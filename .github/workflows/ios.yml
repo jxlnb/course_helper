@@ -1,0 +1,71 @@
+name: Build signed iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-15
+    env:
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.41.8
+          cache: true
+
+      - name: Install Flutter packages
+        run: flutter pub get
+
+      - name: Install signing certificate and provisioning profile
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          test -n "$APPLE_CERTIFICATE_BASE64"
+          test -n "$PROVISIONING_PROFILE_BASE64"
+          test -n "$APPLE_TEAM_ID"
+          test -n "$KEYCHAIN_PASSWORD"
+          CERTIFICATE_PATH="$RUNNER_TEMP/certificate.p12"
+          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          echo -n "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_UUID=$(security cms -D -i "$PROFILE_PATH" | plutil -extract UUID raw -)
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+      - name: Build development signed IPA
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d+ -f1 | tr -d '[:space:]')
+          echo "DEVELOPMENT_TEAM = $APPLE_TEAM_ID" >> ios/Flutter/Release.xcconfig
+          flutter build ipa --release \
+            --export-options-plist=ios/ExportOptions.plist \
+            --build-name="$VERSION" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: course_helper-ios-ipa
+          path: build/ios/ipa/*.ipa
+          if-no-files-found: error
+          retention-days: 14
