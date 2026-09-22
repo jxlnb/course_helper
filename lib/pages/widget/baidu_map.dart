@@ -1,10 +1,20 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter_baidu_mapapi_map/flutter_baidu_mapapi_map.dart';
 import 'package:flutter_baidu_mapapi_base/flutter_baidu_mapapi_base.dart';
 import 'package:flutter_baidu_mapapi_search/flutter_baidu_mapapi_search.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_bmflocation/flutter_bmflocation.dart';
+
+/// iOS 端百度地图 SDK 与百度定位 SDK 必须在运行时通过接口设置 AK，
+/// 两个插件都不会去读 Info.plist。Android 端仍然在
+/// android/app/src/main/AndroidManifest.xml 的 com.baidu.lbsapi.API_KEY 中配置，
+/// 因此下面的调用只在 iOS 上执行，Android 行为完全不变。
+///
+/// 该 AK 绑定 Bundle ID（com.jxlnb.coursehelper），换 Bundle ID 需在
+/// 百度地图开放平台同步修改安全码，否则地图无瓦片、定位不出结果。
+const String _baiduMapAk = 'BwImLMKeRsSOFVAVyS8UFAgzltg8lweT';
 
 class BaiduMapWidget extends StatefulWidget {
   final Function(BMFCoordinate)? onLocationSelected;
@@ -54,6 +64,9 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
 
   /// 初始化定位
   Future<void> _initLocation() async {
+    await _initSdkApiKey();
+    if (_isDisposed) return;
+
     final hasPermission = await _checkPermissions();
     if (_isDisposed) return;
 
@@ -70,6 +83,31 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
 
     if (mounted) {
       setState(() => _isLoading = false);
+    }
+  }
+
+  /// 仅 iOS：给百度定位 SDK 与百度地图 SDK 设置 AK。
+  /// Android 端 AK 在 AndroidManifest.xml 中，已由原生读取，这里直接跳过。
+  Future<void> _initSdkApiKey() async {
+    if (!Platform.isIOS) return;
+
+    try {
+      // 先注册鉴权结果回调，再发起鉴权，避免错过首次回调。
+      _locationPlugin.getApiKeyCallback(callback: (String result) {
+        debugPrint('百度定位鉴权结果：$result');
+        if (!result.endsWith('PermissionState:0') &&
+            !result.endsWith('PermissionState:${0}')) {
+          // 0 为鉴权成功，其余为错误码（AK 错误 / 网络错误 / 配额等）
+          if (mounted && !_hasReceivedFirstFix) {
+            setState(() => _locationInfo = '百度定位鉴权异常：$result');
+          }
+        }
+      });
+
+      await _locationPlugin.authAK(_baiduMapAk);
+      BMFMapSDK.setApiKeyAndCoordType(_baiduMapAk, BMF_COORD_TYPE.BD09LL);
+    } catch (e) {
+      debugPrint('设置百度 AK 失败：$e');
     }
   }
 
