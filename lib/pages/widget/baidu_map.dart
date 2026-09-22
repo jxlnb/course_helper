@@ -92,14 +92,20 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
     if (!Platform.isIOS) return;
 
     try {
+      // 定位插件的隐私合规必须单独设置：未同意之前百度定位 SDK 会拒绝工作并
+      // 返回鉴权网络错误(BMKLocationAuthErrorNetworkFailed = 1)。
+      // 地图插件的那句 BMFMapSDK.setAgreePrivacy 不会覆盖到定位插件。
+      await _locationPlugin.setAgreePrivacy(true);
+
       // 先注册鉴权结果回调，再发起鉴权，避免错过首次回调。
       _locationPlugin.getApiKeyCallback(callback: (String result) {
         debugPrint('百度定位鉴权结果：$result');
         if (!result.endsWith('PermissionState:0') &&
             !result.endsWith('PermissionState:${0}')) {
-          // 0 为鉴权成功，其余为错误码（AK 错误 / 网络错误 / 配额等）
+          // BMKLocationAuthErrorCode: 0=成功 1=网络错误 2=授权失败(AK/安全码)
+          final reason = result.endsWith('1') ? '网络错误' : '授权失败(AK 或安全码不匹配)';
           if (mounted && !_hasReceivedFirstFix) {
-            setState(() => _locationInfo = '百度定位鉴权异常：$result');
+            setState(() => _locationInfo = '百度定位鉴权异常：$result（$reason）');
           }
         }
       });
