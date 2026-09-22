@@ -5,7 +5,7 @@ import 'package:photo_manager/photo_manager.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show WebSocket, File, Platform;
+import 'dart:io' show WebSocket, File;
 
 import '../api/course.dart';
 import '../api/image.dart';
@@ -27,7 +27,7 @@ class _WebSocketKeepAliveHandler extends TaskHandler {
   void onRepeatEvent(DateTime timestamp) {}
 
   @override
-  Future<void> onDestroy(DateTime timestamp) async {}
+  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {}
 }
 
 class PresentationPage extends StatefulWidget {
@@ -163,11 +163,6 @@ class _PresentationPageState extends State<PresentationPage> {
   }
 
   Future<void> _startForegroundService() async {
-    // iOS has no Android-style foreground service. The WebSocket remains active
-    // while this page is in the foreground; background execution is controlled
-    // by iOS and must not be emulated with an unsupported service call.
-    if (!Platform.isAndroid) return;
-
     // 请求忽略电池优化
     if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
       await FlutterForegroundTask.requestIgnoreBatteryOptimization();
@@ -202,7 +197,6 @@ class _PresentationPageState extends State<PresentationPage> {
   }
 
   Future<void> _stopForegroundService() async {
-    if (!Platform.isAndroid) return;
     if (await FlutterForegroundTask.isRunningService) {
       await FlutterForegroundTask.stopService();
     }
@@ -1055,6 +1049,9 @@ class _PresentationPageState extends State<PresentationPage> {
             bgColor = Colors.orange;
             icon = Icons.stop_circle;
             break;
+          case 'LESSON_FINISH':
+            bgColor = Colors.red;
+            icon = Icons.school;
           default:
             bgColor = Colors.grey;
             icon = Icons.info;
