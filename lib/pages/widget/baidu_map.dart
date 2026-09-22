@@ -121,13 +121,16 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
     _locationPlugin.singleLocationCallback(callback: (BaiduLocation result) {
       if (_isDisposed) return;
 
-      if (result.locType != null && result.locType! > 0) {
+      if (_isValidFix(result)) {
         final coord = BMFCoordinate(result.latitude!, result.longitude!);
         _handleLocationUpdate(coord, result);
       } else {
         if (mounted) {
           setState(() {
-            _locationInfo = '定位失败，请重试';
+            final code = result.errorCode;
+            _locationInfo = code == null
+                ? '定位失败，请重试'
+                : '定位失败（错误码 $code：${result.errorInfo ?? '未知原因'}）';
             _isLocating = false;
             _isManualRelocate = false;
           });
@@ -136,6 +139,19 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
     });
 
     await _prepareHighAccuracyLocation();
+  }
+
+  /// 判断一次定位回调是否携带可用坐标。
+  ///
+  /// Android 用 locType(>0 为成功) 标识结果类型；而 iOS 原生只下发
+  /// errorCode / errorInfo 与经纬度，**从不发送 locType**，所以 iOS 上
+  /// result.locType 恒为 null。若沿用 locType 判断，iOS 会把已经成功的
+  /// 定位结果也当成失败丢弃，表现为「定位失败，请重试」。
+  /// 因此这里以「经纬度存在 + 无错误码」为准，两端都适用。
+  bool _isValidFix(BaiduLocation result) {
+    if (result.latitude == null || result.longitude == null) return false;
+    final code = result.errorCode;
+    return code == null || code == 0;
   }
 
   /// 配置定位参数
