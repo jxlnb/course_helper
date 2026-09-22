@@ -37,5 +37,28 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    target.build_configurations.each do |config|
+      # permission_handler excludes EVERY permission by default and only compiles in
+      # the ones listed below. With no macros at all the plugin never talks to the
+      # iOS authorization APIs, so no permission dialog is ever presented and the
+      # app does not appear under Settings > Privacy > Location.
+      # See https://pub.dev/packages/permission_handler -> iOS - CocoaPods.
+      #
+      # Note: merged explicitly instead of using ||= so an existing value coming
+      # from flutter_additional_ios_build_settings() cannot silently win.
+      existing = config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] || ['$(inherited)']
+      existing = [existing] if existing.is_a?(String)
+
+      permissions = [
+        'PERMISSION_LOCATION=1',      # dart: Permission.location / locationWhenInUse
+        'PERMISSION_CAMERA=1',        # dart: Permission.camera
+        'PERMISSION_MICROPHONE=1',    # dart: Permission.microphone
+        'PERMISSION_PHOTOS=1',        # dart: Permission.photos
+        'PERMISSION_NOTIFICATIONS=1', # dart: Permission.notification
+      ]
+
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] = (existing + permissions).uniq
+    end
   end
 end
