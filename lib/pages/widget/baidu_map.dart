@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'dart:io' show HttpClient, Platform;
 import 'package:flutter_baidu_mapapi_map/flutter_baidu_mapapi_map.dart';
 import 'package:flutter_baidu_mapapi_base/flutter_baidu_mapapi_base.dart';
 import 'package:flutter_baidu_mapapi_search/flutter_baidu_mapapi_search.dart';
@@ -61,6 +61,10 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
   /// 因为定位过程中 _locationInfo 会被反复覆盖，鉴权结果容易被冲掉。
   String _diagAuth = '鉴权：未开始';
 
+  /// 网络自检结果：直接测百度 API 域名是否可达，
+  /// 用来区分「网络/DNS 问题」和「AK 服务端问题」。
+  String _diagNet = '网络自检：未运行';
+
   final LocationFlutterPlugin _locationPlugin = LocationFlutterPlugin();
 
   @override
@@ -75,6 +79,7 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
     // 鉴权与权限申请并行：权限弹框不必等鉴权，但真正发起定位前必须等鉴权完成，
     // 否则会出现偶发的「错误码 7：鉴权失败导致无法返回定位、地址等信息」。
     final authFuture = _initSdkApiKey();
+    _runNetworkSelfTest();
 
     final hasPermission = await _checkPermissions();
     if (_isDisposed) return;
@@ -162,6 +167,38 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
       debugPrint('设置百度 AK 失败：$e');
       if (mounted) setState(() => _diagAuth = '鉴权：❌ 异常 $e');
     }
+  }
+
+  /// 直接对百度 API 域名做一次 HTTP 探测。
+  /// 地图瓦片走 CDN 域名，而定位鉴权 / 逆地理编码走 Web 服务域名，
+  /// 两者的网络路径可能不同（DNS 污染、代理绕路等），
+  /// 用这个结果区分「网络问题」和「AK 服务端问题」。
+  Future<void> _runNetworkSelfTest() async {
+    const targets = <String>[
+      'https://api.map.baidu.com/',
+      'https://loc.map.baidu.com/',
+    ];
+    final results = <String>[];
+
+    for (final url in targets) {
+      final host = Uri.parse(url).host;
+      final sw = Stopwatch()..start();
+      HttpClient? client;
+      try {
+        client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+        final req = await client.getUrl(Uri.parse(url));
+        final resp = await req.close().timeout(const Duration(seconds: 8));
+        await resp.forEach((_) {}); // 排空响应体，避免连接未释放
+        results.add('$host → HTTP ${resp.statusCode} (${sw.elapsedMilliseconds}ms)');
+      } catch (e) {
+        results.add('$host → ❌失败(${sw.elapsedMilliseconds}ms): $e');
+      } finally {
+        client?.close(force: true);
+      }
+    }
+
+    if (!mounted || _isDisposed) return;
+    setState(() => _diagNet = '网络自检：${results.join('  |  ')}');
   }
 
   Future<void> _initBaiduLocation() async {
@@ -488,6 +525,11 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
                     style: Theme.of(context).textTheme.bodyMedium),
                 const SizedBox(height: 4),
                 Text(_diagAuth,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.outline,
+                        )),
+                const SizedBox(height: 2),
+                Text(_diagNet,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: Theme.of(context).colorScheme.outline,
                         )),
