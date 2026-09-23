@@ -110,33 +110,46 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
       await _locationPlugin.setAgreePrivacy(true);
 
       // authAK() 会立即返回，真正的鉴权结果是通过回调异步送达的。
-      // 这里必须等回调到达，否则会在鉴权尚未完成时就发起定位，
-      // 表现为偶发的「错误码 7：鉴权失败导致无法返回定位、地址等信息」。
-      final authDone = Completer<String>();
-      if (mounted) setState(() => _diagAuth = '鉴权：等待回调…');
+      // 鉴权是联网校验（请求 loc.map.baidu.com），偶发网络错误很常见，
+      // 所以失败后重试几次，而不是一次失败就永久放弃。
+      var authResult = 'PermissionState:timeout';
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        final authDone = Completer<String>();
+        if (mounted) {
+          setState(() => _diagAuth = attempt == 1
+              ? '鉴权：进行中…'
+              : '鉴权：第 ${attempt - 1} 次失败，重试中…');
+        }
 
-      _locationPlugin.getApiKeyCallback(callback: (String result) {
-        debugPrint('百度定位鉴权结果：$result');
-        if (!authDone.isCompleted) authDone.complete(result);
-      });
+        _locationPlugin.getApiKeyCallback(callback: (String result) {
+          debugPrint('百度定位鉴权结果（第 $attempt 次）：$result');
+          if (!authDone.isCompleted) authDone.complete(result);
+        });
 
-      await _locationPlugin.authAK(_baiduMapAk);
-      BMFMapSDK.setApiKeyAndCoordType(_baiduMapAk, BMF_COORD_TYPE.BD09LL);
+        await _locationPlugin.authAK(_baiduMapAk);
+        BMFMapSDK.setApiKeyAndCoordType(_baiduMapAk, BMF_COORD_TYPE.BD09LL);
 
-      final authResult = await authDone.future.timeout(
-        const Duration(seconds: 10),
-        onTimeout: () => 'PermissionState:timeout',
-      );
-      if (_isDisposed) return;
+        authResult = await authDone.future.timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => 'PermissionState:timeout',
+        );
+        if (_isDisposed) return;
+
+        if (authResult.endsWith('PermissionState:0')) break;
+        if (attempt < 3) {
+          await Future.delayed(const Duration(seconds: 2));
+          if (_isDisposed) return;
+        }
+      }
 
       // BMKLocationAuthErrorCode: 0=成功 1=网络错误 2=授权失败(AK/安全码)
       if (authResult.endsWith('PermissionState:0')) {
         if (mounted) setState(() => _diagAuth = '鉴权：✅ 成功');
       } else {
         final reason = authResult.endsWith('timeout')
-            ? '等回调超时'
+            ? '等回调超时（3 次重试均失败）'
             : (authResult.endsWith('1')
-                ? '网络错误(到百度鉴权服务器不通)'
+                ? '网络错误(到百度鉴权服务器不通，已重试 3 次)'
                 : '授权失败(AK 或安全码不匹配 / 服务未开通)');
         if (mounted) {
           setState(() => _diagAuth = '鉴权：❌ $authResult — $reason');
