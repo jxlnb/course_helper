@@ -57,6 +57,10 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
   /// 逆地理编码搜索失败或被超时截断时用它兜底，避免显示「未知位置」。
   String _lastSdkAddress = '';
 
+  /// 百度定位鉴权状态。这里单独存一份并常驻显示，
+  /// 因为定位过程中 _locationInfo 会被反复覆盖，鉴权结果容易被冲掉。
+  String _diagAuth = '鉴权：未开始';
+
   final LocationFlutterPlugin _locationPlugin = LocationFlutterPlugin();
 
   @override
@@ -109,6 +113,8 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
       // 这里必须等回调到达，否则会在鉴权尚未完成时就发起定位，
       // 表现为偶发的「错误码 7：鉴权失败导致无法返回定位、地址等信息」。
       final authDone = Completer<String>();
+      if (mounted) setState(() => _diagAuth = '鉴权：等待回调…');
+
       _locationPlugin.getApiKeyCallback(callback: (String result) {
         debugPrint('百度定位鉴权结果：$result');
         if (!authDone.isCompleted) authDone.complete(result);
@@ -124,16 +130,24 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
       if (_isDisposed) return;
 
       // BMKLocationAuthErrorCode: 0=成功 1=网络错误 2=授权失败(AK/安全码)
-      if (!authResult.endsWith('PermissionState:0')) {
+      if (authResult.endsWith('PermissionState:0')) {
+        if (mounted) setState(() => _diagAuth = '鉴权：✅ 成功');
+      } else {
         final reason = authResult.endsWith('timeout')
-            ? '等待鉴权回调超时'
-            : (authResult.endsWith('1') ? '网络错误' : '授权失败(AK 或安全码不匹配)');
+            ? '等回调超时'
+            : (authResult.endsWith('1')
+                ? '网络错误(到百度鉴权服务器不通)'
+                : '授权失败(AK 或安全码不匹配 / 服务未开通)');
         if (mounted) {
-          setState(() => _locationInfo = '百度定位鉴权异常：$authResult（$reason）');
+          setState(() => _diagAuth = '鉴权：❌ $authResult — $reason');
+        }
+        if (mounted) {
+          setState(() => _locationInfo = '百度定位鉴权异常（$reason）');
         }
       }
     } catch (e) {
       debugPrint('设置百度 AK 失败：$e');
+      if (mounted) setState(() => _diagAuth = '鉴权：❌ 异常 $e');
     }
   }
 
@@ -194,6 +208,8 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
         reGeocodeTimeout: 15,
         desiredAccuracy: BMFDesiredAccuracy.best,
         distanceFilter: 3.0,
+        // Android 侧一直有设，iOS 侧之前漏了：请求最新版逆地理编码数据
+        isNeedNewVersionRgc: true,
       );
 
       await _locationPlugin.prepareLoc(
@@ -457,6 +473,11 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
                 const SizedBox(height: 8),
                 Text(_locationInfo,
                     style: Theme.of(context).textTheme.bodyMedium),
+                const SizedBox(height: 4),
+                Text(_diagAuth,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.outline,
+                        )),
                 const SizedBox(height: 12),
                 Row(
                   children: [
