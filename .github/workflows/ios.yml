@@ -2,12 +2,17 @@ name: Build unsigned iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '可选：填 tag（如 ios-v1.1.9）则同时把 IPA 发布到该 Release'
+        required: false
+        default: ''
   push:
     tags:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-ios:
@@ -70,3 +75,31 @@ jobs:
           path: build/ios/ipa/*.ipa
           if-no-files-found: error
           retention-days: 14
+
+      # 可选：把 IPA 挂到 Release 上长期保存（artifact 只保留 14 天）。
+      # 由 workflow_dispatch 的 release_tag 输入触发，不填则跳过。
+      - name: Publish IPA to GitHub Release
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          IPA="build/ios/ipa/course_helper-unsigned.ipa"
+          test -f "$IPA"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists, uploading asset"
+          else
+            gh release create "$TAG" \
+              --title "course_helper iOS $TAG（未签名 IPA）" \
+              --notes "未签名 iOS IPA，使用前需用自己的证书重签。
+
+- Bundle ID：com.jxlnb.coursehelper
+- 最低系统：iOS 13.0
+- 安装方式：下载 ipa 后用自签工具签名安装
+
+本产物不含任何 Apple 签名凭据。"
+          fi
+
+          gh release upload "$TAG" "$IPA" --clobber
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size) bytes  \(.url)"'

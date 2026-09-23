@@ -1,12 +1,11 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
-import 'dart:io' show HttpClient, Platform;
+import 'dart:io' show Platform;
 import 'package:flutter_baidu_mapapi_map/flutter_baidu_mapapi_map.dart';
 import 'package:flutter_baidu_mapapi_base/flutter_baidu_mapapi_base.dart';
 import 'package:flutter_baidu_mapapi_search/flutter_baidu_mapapi_search.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_bmflocation/flutter_bmflocation.dart';
-import 'package:package_info_plus/package_info_plus.dart';
 
 /// iOS 端百度地图 SDK 与百度定位 SDK 必须在运行时通过接口设置 AK，
 /// 两个插件都不会去读 Info.plist。Android 端仍然在
@@ -58,19 +57,6 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
   /// 逆地理编码搜索失败或被超时截断时用它兜底，避免显示「未知位置」。
   String _lastSdkAddress = '';
 
-  /// 百度定位鉴权状态。这里单独存一份并常驻显示，
-  /// 因为定位过程中 _locationInfo 会被反复覆盖，鉴权结果容易被冲掉。
-  String _diagAuth = '鉴权：未开始';
-
-  /// 网络自检结果：直接测百度 API 域名是否可达，
-  /// 用来区分「网络/DNS 问题」和「AK 服务端问题」。
-  String _diagNet = '网络自检：未运行';
-
-  /// App 运行时真实的 Bundle Identifier。
-  /// 自签工具（爱思助手等）可能在重签时改写 Bundle ID，
-  /// 一旦与百度后台的安全码不一致，定位鉴权就会被服务器拒绝。
-  String _diagBundle = 'BundleID：读取中…';
-
   final LocationFlutterPlugin _locationPlugin = LocationFlutterPlugin();
 
   @override
@@ -85,8 +71,6 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
     // 鉴权与权限申请并行：权限弹框不必等鉴权，但真正发起定位前必须等鉴权完成，
     // 否则会出现偶发的「错误码 7：鉴权失败导致无法返回定位、地址等信息」。
     final authFuture = _initSdkApiKey();
-    _runNetworkSelfTest();
-    _loadBundleId();
 
     final hasPermission = await _checkPermissions();
     if (_isDisposed) return;
@@ -127,11 +111,6 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
       var authResult = 'PermissionState:timeout';
       for (var attempt = 1; attempt <= 3; attempt++) {
         final authDone = Completer<String>();
-        if (mounted) {
-          setState(() => _diagAuth = attempt == 1
-              ? '鉴权：进行中…'
-              : '鉴权：第 ${attempt - 1} 次失败，重试中…');
-        }
 
         _locationPlugin.getApiKeyCallback(callback: (String result) {
           debugPrint('百度定位鉴权结果（第 $attempt 次）：$result');
@@ -155,70 +134,21 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
       }
 
       // BMKLocationAuthErrorCode: 0=成功 1=网络错误 2=授权失败(AK/安全码)
-      if (authResult.endsWith('PermissionState:0')) {
-        if (mounted) setState(() => _diagAuth = '鉴权：✅ 成功');
-      } else {
+      if (!authResult.endsWith('PermissionState:0')) {
+        // 鉴权失败时给出可操作的提示。最常见的原因是自签工具改写了 Bundle ID，
+        // 导致 App 实际包名与百度后台的安全码不一致（地图 SDK 校验较松，
+        // 所以常表现为「地图能显示、定位与地址拿不到」）。
         final reason = authResult.endsWith('timeout')
-            ? '等回调超时（3 次重试均失败）'
-            : (authResult.endsWith('1')
-                ? '网络错误(到百度鉴权服务器不通，已重试 3 次)'
-                : '授权失败(AK 或安全码不匹配 / 服务未开通)');
+            ? '等待百度鉴权回调超时'
+            : (authResult.endsWith('1') ? '无法连接百度鉴权服务器' : 'AK 或安全码不匹配');
+        debugPrint('百度定位鉴权失败：$authResult（$reason）');
         if (mounted) {
-          setState(() => _diagAuth = '鉴权：❌ $authResult — $reason');
-        }
-        if (mounted) {
-          setState(() => _locationInfo = '百度定位鉴权异常（$reason）');
+          setState(() => _locationInfo =
+              '百度定位鉴权失败（$reason）\n请检查百度后台的「安全码」是否与 App 的实际 Bundle ID 完全一致');
         }
       }
     } catch (e) {
       debugPrint('设置百度 AK 失败：$e');
-      if (mounted) setState(() => _diagAuth = '鉴权：❌ 异常 $e');
-    }
-  }
-
-  /// 直接对百度 API 域名做一次 HTTP 探测。
-  /// 地图瓦片走 CDN 域名，而定位鉴权 / 逆地理编码走 Web 服务域名，
-  /// 两者的网络路径可能不同（DNS 污染、代理绕路等），
-  /// 用这个结果区分「网络问题」和「AK 服务端问题」。
-  Future<void> _runNetworkSelfTest() async {
-    const targets = <String>[
-      'https://api.map.baidu.com/',
-      'https://loc.map.baidu.com/',
-    ];
-    final results = <String>[];
-
-    for (final url in targets) {
-      final host = Uri.parse(url).host;
-      final sw = Stopwatch()..start();
-      HttpClient? client;
-      try {
-        client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
-        final req = await client.getUrl(Uri.parse(url));
-        final resp = await req.close().timeout(const Duration(seconds: 8));
-        await resp.forEach((_) {}); // 排空响应体，避免连接未释放
-        results.add('$host → HTTP ${resp.statusCode} (${sw.elapsedMilliseconds}ms)');
-      } catch (e) {
-        results.add('$host → ❌失败(${sw.elapsedMilliseconds}ms): $e');
-      } finally {
-        client?.close(force: true);
-      }
-    }
-
-    if (!mounted || _isDisposed) return;
-    setState(() => _diagNet = '网络自检：${results.join('  |  ')}');
-  }
-
-  /// 读取 App 运行时真实的 Bundle Identifier。
-  /// 自签工具重签时可能改写它，而百度 AK 的安全码是按 Bundle ID 校验的，
-  /// 不一致就会导致定位鉴权被服务器拒绝。
-  Future<void> _loadBundleId() async {
-    try {
-      final info = await PackageInfo.fromPlatform();
-      if (!mounted || _isDisposed) return;
-      setState(() => _diagBundle = 'BundleID：${info.packageName}');
-    } catch (e) {
-      if (!mounted || _isDisposed) return;
-      setState(() => _diagBundle = 'BundleID：读取失败 $e');
     }
   }
 
@@ -544,21 +474,6 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
                 const SizedBox(height: 8),
                 Text(_locationInfo,
                     style: Theme.of(context).textTheme.bodyMedium),
-                const SizedBox(height: 4),
-                Text(_diagAuth,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.outline,
-                        )),
-                const SizedBox(height: 2),
-                Text(_diagNet,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.outline,
-                        )),
-                const SizedBox(height: 2),
-                Text(_diagBundle,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.outline,
-                        )),
                 const SizedBox(height: 12),
                 Row(
                   children: [
