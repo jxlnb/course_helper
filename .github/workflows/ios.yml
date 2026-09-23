@@ -25,15 +25,43 @@ jobs:
       - name: Install Flutter packages
         run: flutter pub get
 
-      - name: Build unsigned IPA
+      # 百度地图/定位、环信等 pod 的 CDN 从 GitHub runner 访问不稳定，
+      # 会出现 curl timeout / connection reset 导致 pod install 失败。
+      # 缓存 CocoaPods 下载目录，让重试不必重新下载已经拿到的包。
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/CocoaPods
+          key: cocoapods-${{ runner.os }}-${{ hashFiles('ios/Podfile', 'pubspec.lock') }}
+          restore-keys: |
+            cocoapods-${{ runner.os }}-
+
+      # flutter build ios 内部会跑 pod install，所以直接对整个构建做重试，
+      # 每次失败后清掉 Pods/Podfile.lock 再试，避免半成品缓存导致连续失败。
+      - name: Build unsigned IPA (retry on flaky pod download)
         run: |
+          set -o pipefail
           VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d+ -f1 | tr -d '[:space:]')
-          flutter build ios --release --no-codesign \
-            --build-name="$VERSION" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+          echo "building version $VERSION build ${GITHUB_RUN_NUMBER}"
+
+          for attempt in 1 2 3 4 5; do
+            echo "===== build attempt $attempt ====="
+            if flutter build ios --release --no-codesign \
+                 --build-name="$VERSION" \
+                 --build-number="${GITHUB_RUN_NUMBER}"; then
+              echo "build succeeded on attempt $attempt"
+              break
+            fi
+            echo "attempt $attempt failed; clearing Pods and build output, retrying"
+            rm -rf ios/Pods ios/Podfile.lock build/ios
+            sleep 20
+          done
+
+          test -d build/ios/iphoneos/Runner.app
           mkdir -p build/ios/ipa/Payload
           cp -R build/ios/iphoneos/Runner.app build/ios/ipa/Payload/Runner.app
           ditto -c -k --sequesterRsrc --keepParent build/ios/ipa/Payload build/ios/ipa/course_helper-unsigned.ipa
+          ls -lh build/ios/ipa/
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
