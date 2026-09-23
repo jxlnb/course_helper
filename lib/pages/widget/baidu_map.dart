@@ -6,6 +6,7 @@ import 'package:flutter_baidu_mapapi_base/flutter_baidu_mapapi_base.dart';
 import 'package:flutter_baidu_mapapi_search/flutter_baidu_mapapi_search.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_bmflocation/flutter_bmflocation.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 /// iOS 端百度地图 SDK 与百度定位 SDK 必须在运行时通过接口设置 AK，
 /// 两个插件都不会去读 Info.plist。Android 端仍然在
@@ -65,6 +66,11 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
   /// 用来区分「网络/DNS 问题」和「AK 服务端问题」。
   String _diagNet = '网络自检：未运行';
 
+  /// App 运行时真实的 Bundle Identifier。
+  /// 自签工具（爱思助手等）可能在重签时改写 Bundle ID，
+  /// 一旦与百度后台的安全码不一致，定位鉴权就会被服务器拒绝。
+  String _diagBundle = 'BundleID：读取中…';
+
   final LocationFlutterPlugin _locationPlugin = LocationFlutterPlugin();
 
   @override
@@ -80,6 +86,7 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
     // 否则会出现偶发的「错误码 7：鉴权失败导致无法返回定位、地址等信息」。
     final authFuture = _initSdkApiKey();
     _runNetworkSelfTest();
+    _loadBundleId();
 
     final hasPermission = await _checkPermissions();
     if (_isDisposed) return;
@@ -199,6 +206,20 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
 
     if (!mounted || _isDisposed) return;
     setState(() => _diagNet = '网络自检：${results.join('  |  ')}');
+  }
+
+  /// 读取 App 运行时真实的 Bundle Identifier。
+  /// 自签工具重签时可能改写它，而百度 AK 的安全码是按 Bundle ID 校验的，
+  /// 不一致就会导致定位鉴权被服务器拒绝。
+  Future<void> _loadBundleId() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (!mounted || _isDisposed) return;
+      setState(() => _diagBundle = 'BundleID：${info.packageName}');
+    } catch (e) {
+      if (!mounted || _isDisposed) return;
+      setState(() => _diagBundle = 'BundleID：读取失败 $e');
+    }
   }
 
   Future<void> _initBaiduLocation() async {
@@ -530,6 +551,11 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
                         )),
                 const SizedBox(height: 2),
                 Text(_diagNet,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.outline,
+                        )),
+                const SizedBox(height: 2),
+                Text(_diagBundle,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: Theme.of(context).colorScheme.outline,
                         )),
