@@ -53,6 +53,10 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
   /// Android 端 singleLocation 底层复用连续定位回调
   bool _hasReceivedFirstFix = false;
 
+  /// 百度定位 SDK 直接返回的地址文案（isReGeocode 生效时非空）。
+  /// 逆地理编码搜索失败或被超时截断时用它兜底，避免显示「未知位置」。
+  String _lastSdkAddress = '';
+
   final LocationFlutterPlugin _locationPlugin = LocationFlutterPlugin();
 
   @override
@@ -64,8 +68,9 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
 
   /// 初始化定位
   Future<void> _initLocation() async {
-    await _initSdkApiKey();
-    if (_isDisposed) return;
+    // 鉴权与权限申请并行：权限弹框不必等鉴权，但真正发起定位前必须等鉴权完成，
+    // 否则会出现偶发的「错误码 7：鉴权失败导致无法返回定位、地址等信息」。
+    final authFuture = _initSdkApiKey();
 
     final hasPermission = await _checkPermissions();
     if (_isDisposed) return;
@@ -74,6 +79,9 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
       if (mounted) setState(() => _isLoading = false);
       return;
     }
+
+    await authFuture;
+    if (_isDisposed) return;
 
     await _initBaiduLocation();
     if (_isDisposed) return;
@@ -97,21 +105,33 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
       // 地图插件的那句 BMFMapSDK.setAgreePrivacy 不会覆盖到定位插件。
       await _locationPlugin.setAgreePrivacy(true);
 
-      // 先注册鉴权结果回调，再发起鉴权，避免错过首次回调。
+      // authAK() 会立即返回，真正的鉴权结果是通过回调异步送达的。
+      // 这里必须等回调到达，否则会在鉴权尚未完成时就发起定位，
+      // 表现为偶发的「错误码 7：鉴权失败导致无法返回定位、地址等信息」。
+      final authDone = Completer<String>();
       _locationPlugin.getApiKeyCallback(callback: (String result) {
         debugPrint('百度定位鉴权结果：$result');
-        if (!result.endsWith('PermissionState:0') &&
-            !result.endsWith('PermissionState:${0}')) {
-          // BMKLocationAuthErrorCode: 0=成功 1=网络错误 2=授权失败(AK/安全码)
-          final reason = result.endsWith('1') ? '网络错误' : '授权失败(AK 或安全码不匹配)';
-          if (mounted && !_hasReceivedFirstFix) {
-            setState(() => _locationInfo = '百度定位鉴权异常：$result（$reason）');
-          }
-        }
+        if (!authDone.isCompleted) authDone.complete(result);
       });
 
       await _locationPlugin.authAK(_baiduMapAk);
       BMFMapSDK.setApiKeyAndCoordType(_baiduMapAk, BMF_COORD_TYPE.BD09LL);
+
+      final authResult = await authDone.future.timeout(
+        const Duration(seconds: 10),
+        onTimeout: () => 'PermissionState:timeout',
+      );
+      if (_isDisposed) return;
+
+      // BMKLocationAuthErrorCode: 0=成功 1=网络错误 2=授权失败(AK/安全码)
+      if (!authResult.endsWith('PermissionState:0')) {
+        final reason = authResult.endsWith('timeout')
+            ? '等待鉴权回调超时'
+            : (authResult.endsWith('1') ? '网络错误' : '授权失败(AK 或安全码不匹配)');
+        if (mounted) {
+          setState(() => _locationInfo = '百度定位鉴权异常：$authResult（$reason）');
+        }
+      }
     } catch (e) {
       debugPrint('设置百度 AK 失败：$e');
     }
@@ -195,11 +215,14 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
     }
     _hasReceivedFirstFix = true;
 
+    final sdkAddress = location.address?.trim() ?? '';
+    if (sdkAddress.isNotEmpty) _lastSdkAddress = sdkAddress;
+
     setState(() {
       _currentPosition = coordinate;
       _isLocating = false;
       _locationInfo =
-      '地址：${location.address ?? ''}\n纬度：${coordinate.latitude.toStringAsFixed(6)}, 经度：${coordinate.longitude.toStringAsFixed(6)}';
+      '地址：${sdkAddress.isEmpty ? '解析中...' : sdkAddress}\n纬度：${coordinate.latitude.toStringAsFixed(6)}, 经度：${coordinate.longitude.toStringAsFixed(6)}';
     });
 
     if (_mapController != null) {
@@ -300,6 +323,12 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
     String address = await _getAddressFromCoordinate(position);
     if (_isDisposed || !mounted) return address;
 
+    // 逆地理编码搜索失败/超时时，退回定位 SDK 直接给出的地址，
+    // 避免把已经拿到的位置标成「未知位置」。
+    if ((address.isEmpty || address == '未知位置') && _lastSdkAddress.isNotEmpty) {
+      address = _lastSdkAddress;
+    }
+
     setState(() {
       _markerPosition = position;
       _locationInfo = '地址：$address\n纬度：${position.latitude.toStringAsFixed(6)}, 经度：${position.longitude.toStringAsFixed(6)}';
@@ -354,7 +383,7 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
       await search.reverseGeoCodeSearch(option);
 
       return await completer.future.timeout(
-        const Duration(seconds: 3),
+        const Duration(seconds: 6),
         onTimeout: () => '未知位置',
       );
     } catch (e) {
