@@ -1,9 +1,9 @@
-import 'package:flutter/foundation.dart';
 import 'dart:async';
 
 import '../api/api_service.dart';
 import '../session/account.dart';
 import '../utils/storage.dart';
+import '../utils/logger.dart';
 
 /// 平台类型枚举
 enum PlatformType {
@@ -77,7 +77,7 @@ class PlatformManager {
       // 触发平台变化回调，初始化 headers
       ApiService.onPlatformChange!();
     } catch (e) {
-      debugPrint('加载平台失败：$e');
+      logger.e('加载平台失败：$e');
     }
   }
 
@@ -90,7 +90,7 @@ class PlatformManager {
       try {
         StorageManager.prefs.setString(_platformKey, _currentPlatform.name);
       } catch (e) {
-        debugPrint('保存平台失败：$e');
+        logger.e('保存平台失败：$e');
       }
       ApiService.onPlatformChange?.call();
       await AccountManager.switchToPlatformAccounts();
@@ -104,7 +104,7 @@ class PlatformManager {
       try {
         StorageManager.prefs.setString(_serverKey, _currentServer.name);
       } catch (e) {
-        debugPrint('保存服务器失败：$e');
+        logger.e('保存服务器失败：$e');
       }
       ApiService.onPlatformChange?.call();
     }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:course_helper/session/account.dart';
 import 'package:flutter/material.dart';
 import 'package:im_flutter_sdk/im_flutter_sdk.dart';
@@ -8,6 +10,8 @@ import '../main.dart';
 import '../pages/courses/list.dart';
 import '../models/active.dart';
 import '../platform.dart';
+import '../utils/logger.dart';
+import '../utils/time.dart';
 
 /// 环信即时通讯
 class EasemobIM {
@@ -23,6 +27,9 @@ class EasemobIM {
   final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
 
   Function(bool)? _onConnectionChanged;
+
+  final List<_ActivityPayload> _pending = [];
+  Timer? _dialogDebounce;
 
   void setConnectionCallback(Function(bool)? callback) {
     _onConnectionChanged = callback;
@@ -68,11 +75,11 @@ class EasemobIM {
         ConnectionEventHandler(
           onConnected: () {
             _isLoggedIn = true;
-            debugPrint('已连接到环信服务器');
+            logger.i('已连接到环信服务器');
             _onConnectionChanged?.call(true);
           },
           onDisconnected: () {
-            debugPrint('断开连接');
+            logger.i('断开连接');
             _onConnectionChanged?.call(false);
           },
           // 用户从其他设备登录
@@ -88,7 +95,7 @@ class EasemobIM {
         'easemob_msg_handler',
         ChatEventHandler(
           onMessagesReceived: (List<ChatMessage> messages) {
-            debugPrint('收到 ${messages.length} 条新消息');
+            logger.i('收到 ${messages.length} 条新消息');
             for (var message in messages) {
               onMessageReceived?.call(message);
               _handleMessage(message);
@@ -99,7 +106,7 @@ class EasemobIM {
 
       _isLoggedIn = await ChatClient.getInstance.isLoginBefore();
     } catch (e) {
-      debugPrint('初始化错误: $e');
+      logger.e('初始化错误: $e');
       rethrow;
     }
   }
@@ -115,7 +122,7 @@ class EasemobIM {
         await Permission.notification.request();
       }
     } catch (e) {
-      debugPrint('Easemob登录失败: $e');
+      logger.e('Easemob登录失败: $e');
       // code: 200 desc: The user is already logged in
       // code: 218 desc: Another user is already logged in
     }
@@ -132,7 +139,7 @@ class EasemobIM {
       _isLoggedIn = false;
       _onConnectionChanged?.call(false);
     } catch (e) {
-      debugPrint('Easemob退出失败: $e');
+      logger.e('Easemob退出失败: $e');
     }
   }
 
@@ -154,11 +161,10 @@ class EasemobIM {
       );
 
       final courseInfo = activeInfo['courseInfo'];
-      final courseId = courseInfo?['courseid'] ?? '';
-      final classId = courseInfo?['classid'].toString() ?? '';
-      final courseName = courseInfo?['coursename'] ??
-          message.attributes!['em_apns_ext']['em_push_title'];
-      // late String? groupName;
+      final courseId = (courseInfo?['courseid'] ?? '').toString();
+      final classId = (courseInfo?['classid'] ?? '').toString();
+      final courseName = (courseInfo?['coursename'] ??
+          message.attributes!['em_apns_ext']['em_push_title'] ?? '').toString();
 
       final androidDetails = AndroidNotificationDetails(
         'course_activity_channel',
@@ -171,7 +177,7 @@ class EasemobIM {
       final notificationDetails = NotificationDetails(android: androidDetails);
 
       final int notificationId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      
+
       await _notificationsPlugin.show(
         id: notificationId,
         title: '课程活动',
@@ -180,39 +186,142 @@ class EasemobIM {
         payload: '${active.id}|$courseId|$classId',
       );
 
-      // 始终显示应用内对话框（可选）
-      final context = navigatorKey.currentContext;
-      if (context != null) {
-        showDialog(
-          context: context,
-          builder: (dialogContext) => AlertDialog(
-            title: Text('课程活动'),
-            content: SingleChildScrollView(
-              child: Text(
-                '收到来自$courseName的$activeTypeName活动',
-                style: const TextStyle(fontSize: 15)
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('取消'),
-              ),
-              FilledButton(
-                onPressed: () async {
-                  await PlatformManager().setPlatform(PlatformType.chaoxing);
-                  Navigator.pop(dialogContext);
-                  CoursesPage.navigateToActive(context, active, courseId, classId, '');
-                },
-                child: const Text('查看'),
-              ),
-            ],
-          ),
-        );
-      }
+      ActivityMessageStore().add(courseId, classId);
+      _pending.add(_ActivityPayload(
+        active: active,
+        activeTypeName: activeTypeName,
+        courseId: courseId,
+        classId: classId,
+        courseName: courseName,
+        serverTime: message.serverTime
+      ));
+      _scheduleDialog();
     }
 
-    debugPrint('消息: ${message.toJson()}');
+    logger.d('消息: ${message.toJson()}');
+  }
+
+  void _scheduleDialog() {
+    _dialogDebounce?.cancel();
+    _dialogDebounce = Timer(const Duration(milliseconds: 400), () {
+      final pending = List<_ActivityPayload>.from(_pending);
+      _pending.clear();
+      if (pending.isEmpty) return;
+
+      if (pending.length == 1) {
+        _showActivityDialog(pending.first);
+      } else {
+        _showActivityListDialog(pending);
+      }
+    });
+  }
+
+  void _showActivityDialog(_ActivityPayload payload) {
+    final context = navigatorKey.currentContext;
+    if (context == null) return;
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('课程活动'),
+        content: SingleChildScrollView(
+          child: Text(
+            '收到来自${payload.courseName}的${payload.activeTypeName}活动',
+            style: const TextStyle(fontSize: 15),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              await PlatformManager().setPlatform(PlatformType.chaoxing);
+              Navigator.pop(dialogContext);
+              CoursesPage.navigateToActive(
+                context,
+                payload.active,
+                payload.courseId,
+                payload.classId,
+                '',
+              );
+            },
+            child: const Text('查看'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showActivityListDialog(List<_ActivityPayload> list) {
+    final context = navigatorKey.currentContext;
+    if (context == null) return;
+
+    final reversed = list.reversed.toList();
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('课程活动'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: reversed.length,
+            itemBuilder: (itemContext, index) {
+              final payload = reversed[index];
+              final title = payload.active.name.isEmpty ?
+              payload.activeTypeName : payload.active.name;
+              final subtitle = payload.courseName.isEmpty ?
+              payload.activeTypeName : payload.courseName;
+
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: CircleAvatar(
+                  backgroundColor: Theme.of(itemContext).colorScheme.secondaryContainer,
+                  child: Icon(
+                    payload.active.getIcon(),
+                    color: Theme.of(itemContext).colorScheme.onSecondaryContainer
+                  )
+                ),
+                title: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis
+                ),
+                subtitle: Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis
+                ),
+                trailing: Text(
+                  formatRelativeTime(DateTime.fromMillisecondsSinceEpoch(payload.serverTime)),
+                  style: const TextStyle(fontSize: 12, color: Colors.grey)
+                ),
+                onTap: () async {
+                  await PlatformManager().setPlatform(PlatformType.chaoxing);
+                  // Navigator.pop(dialogContext);
+                  CoursesPage.navigateToActive(
+                    context,
+                    payload.active,
+                    payload.courseId,
+                    payload.classId,
+                    ''
+                  );
+                },
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
 
@@ -253,4 +362,61 @@ class EasemobIM {
     ChatClient.getInstance.removeConnectionEventHandler('easemob_conn_handler');
     _isLoggedIn = false;
   }
+}
+
+class _ActivityPayload {
+  final Active active;
+  final String activeTypeName;
+  final String courseId;
+  final String classId;
+  final String courseName;
+  final int serverTime;
+
+  _ActivityPayload({
+    required this.active,
+    required this.activeTypeName,
+    required this.courseId,
+    required this.classId,
+    required this.courseName,
+    required this.serverTime,
+  });
+}
+
+/// 课程活动未读消息存储。
+class ActivityMessageStore {
+  static final ActivityMessageStore _instance = ActivityMessageStore._internal();
+  factory ActivityMessageStore() => _instance;
+  ActivityMessageStore._internal();
+
+  final Map<String, _CourseUnread> _unread = {};
+  final StreamController<void> _controller = StreamController.broadcast();
+
+  Stream<void> get changes => _controller.stream;
+
+  String _key(String courseId, String classId) => '$courseId|$classId';
+
+  void add(String courseId, String classId) {
+    _unread.putIfAbsent(_key(courseId, classId), () => _CourseUnread()).count++;
+    _controller.add(null);
+  }
+
+  int countOf(String courseId, String classId) =>
+      _unread[_key(courseId, classId)]?.count ?? 0;
+
+  void clear(String courseId, String classId) {
+    if (_unread.remove(_key(courseId, classId)) != null) {
+      _controller.add(null);
+    }
+  }
+
+  void clearAll() {
+    if (_unread.isNotEmpty) {
+      _unread.clear();
+      _controller.add(null);
+    }
+  }
+}
+
+class _CourseUnread {
+  int count = 0;
 }

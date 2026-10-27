@@ -1,29 +1,60 @@
-import'package:flutter/material.dart';
-import'package:flutter_localizations/flutter_localizations.dart';
-import'package:dynamic_color/dynamic_color.dart';
-import'package:package_info_plus/package_info_plus.dart';
-import'package:url_launcher/url_launcher.dart';
-import'package:dio/dio.dart';
-import'package:photo_manager/photo_manager.dart';
+import 'dart:io' show Platform;
 
-import'./pages/accounts.dart';
-import'./pages/courses/list.dart';
-import'./pages/login.dart';
-import'./api/api_service.dart';
-import'./session/cookie.dart';
-import'./session/account.dart';
-import'./platform.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:dynamic_color/dynamic_color.dart';
+import 'package:photo_manager/photo_manager.dart';
+import 'package:flutter_baidu_mapapi_base/flutter_baidu_mapapi_base.dart';
+import 'package:flutter_bmflocation/flutter_bmflocation.dart';
+
+import './pages/accounts.dart';
+import './pages/courses/list.dart';
+import './pages/login.dart';
+import './api/api_service.dart';
+import './session/cookie.dart';
+import './session/account.dart';
+import './platform.dart';
 import './utils/storage.dart';
+import './utils/logger.dart';
 import 'push/easemob.dart';
+import 'push/update.dart';
 
 // 赞助对话框显示状态键
 const _hasSponsoredKey = 'has_sponsored';
 
+// 百度地图 iOS 端 AK。
+// 该 AK 绑定百度后台配置的「安全码」，必须与安装后 App 的实际 Bundle ID 一致，
+// 否则地图能显示但定位鉴权会被服务器拒绝（表现为「定位失败 / 地址为空」）。
+// 注意：自签工具（如爱思助手）会在 Bundle ID 后追加 Apple Team ID，
+// 例如 com.jxlnb.coursehelper -> com.jxlnb.coursehelper.FX444HYBRA，
+// 后台安全码需要填写追加后的完整值。
+const _baiduMapIosAk = 'BwImLMKeRsSOFVAVyS8UFAgzltg8lweT';
+
 // 全局Navigator Key,用于在无context时显示dialog
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
+Future<void> _initBaiduMapForIOS() async {
+  if (!Platform.isIOS) return;
+
+  BMFMapSDK.setAgreePrivacy(true);
+  BMFMapSDK.setApiKeyAndCoordType(_baiduMapIosAk, BMF_COORD_TYPE.BD09LL);
+
+  // 定位 SDK 为独立鉴权
+  final locationPlugin = LocationFlutterPlugin();
+  await locationPlugin.setAgreePrivacy(true);
+  await locationPlugin.authAK(_baiduMapIosAk);
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  await initLogger();
+
+  FlutterError.onError = (details) {
+    logger.e('FlutterError', error: details.exception, stackTrace: details.stack);
+  };
+
+  await _initBaiduMapForIOS();
 
   await StorageManager.initialize();
 
@@ -43,10 +74,43 @@ void main() async {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
+  SnackBarThemeData _snackBarTheme(ColorScheme scheme) {
+    return SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: scheme.secondaryContainer,
+      elevation: 8,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+      ),
+      insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      contentTextStyle: TextStyle(
+        color: scheme.onSecondaryContainer,
+        fontSize: 14,
+        height: 1.4
+      ),
+      actionTextColor: scheme.primary,
+      showCloseIcon: false,
+      dismissDirection: DismissDirection.horizontal
+    );
+  }
+
+  ThemeData _buildTheme(ColorScheme scheme) {
+    return ThemeData(
+      useMaterial3: true,
+      colorScheme: scheme,
+      snackBarTheme: _snackBarTheme(scheme)
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return DynamicColorBuilder(
       builder: (ColorScheme? lightDynamic, ColorScheme? darkDynamic) {
+        final lightScheme = lightDynamic ??
+            ColorScheme.fromSeed(seedColor: Colors.deepPurple);
+        final darkScheme = darkDynamic ??
+            ColorScheme.fromSeed(seedColor: Colors.deepPurple, brightness: Brightness.dark,);
+
         return MaterialApp(
           navigatorKey: navigatorKey,
           title: '课程助手',
@@ -60,18 +124,8 @@ class MyApp extends StatelessWidget {
             GlobalWidgetsLocalizations.delegate,
             GlobalCupertinoLocalizations.delegate
           ],
-          theme: ThemeData(
-            // Material You
-            useMaterial3: true,
-            colorScheme: lightDynamic ?? ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-          ),
-          darkTheme: ThemeData(
-            useMaterial3: true,
-            colorScheme: darkDynamic ?? ColorScheme.fromSeed(
-              seedColor: Colors.deepPurple,
-              brightness: Brightness.dark,
-            ),
-          ),
+          theme: _buildTheme(lightScheme),
+          darkTheme: _buildTheme(darkScheme),
           themeMode: ThemeMode.system,
           home: const MyHomePage(),
           routes: {
@@ -113,94 +167,9 @@ class _MainPageState extends State<MainPage> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       (coursesPageKey.currentState as dynamic)?.onVisibilityChanged(true);
-      _checkUpdate();
+      Update.checkUpdate();
       _showSponsorDialog();
     });
-  }
-
-  Future<void> _checkUpdate() async {
-    try {
-      final packageInfo = await PackageInfo.fromPlatform();
-      final currentVersion = packageInfo.version;
-
-      final dio = Dio();
-      final response = await dio.get('https://api.github.com/repos/AneryCoft/course_helper/releases/latest');
-      final data = response.data;
-      final latestVersion = data['tag_name']?.toString().replaceAll('v', '') ?? '';
-
-      if (_isNewerVersion(latestVersion, currentVersion)) {
-        _showUpdateDialog(
-          latestVersion: latestVersion,
-          releaseNotes: data['body'] ?? '暂无更新说明',
-          downloadUrl: data['html_url'] ?? 'https://github.com/AneryCoft/course_helper/releases/latest',
-        );
-      }
-    } catch (e) {
-      // 忽略更新检查错误
-    }
-  }
-
-  bool _isNewerVersion(String latest, String current) {
-    try {
-      final latestParts = latest.split('.').map(int.parse).toList();
-      final currentParts = current.split('.').map(int.parse).toList();
-      
-      for (int i = 0; i < 3; i++) {
-        final latestNum = i < latestParts.length ? latestParts[i] : 0;
-        final currentNum = i < currentParts.length ? currentParts[i] : 0;
-        
-        if (latestNum > currentNum) return true;
-        if (latestNum < currentNum) return false;
-      }
-      return false;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  void _showUpdateDialog({
-    required String latestVersion,
-    required String releaseNotes,
-    required String downloadUrl,
-  }) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('发现新版本'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '最新版本: v$latestVersion',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                '更新内容:',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 4),
-              Text(releaseNotes),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('稍后'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.pop(context);
-              launchUrl(Uri.parse(downloadUrl));
-            },
-            child: const Text('前往下载'),
-          ),
-        ],
-      ),
-    );
   }
 
   void _showSponsorDialog() {

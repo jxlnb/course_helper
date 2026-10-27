@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../../utils/logger.dart';
+
 class ScanPage extends StatefulWidget {
   final Function(String)? onScanResult;
 
@@ -78,7 +80,7 @@ class _ScanPageState extends State<ScanPage>
           controller.stop();
       }
     } catch (e) {
-      debugPrint('Lifecycle handling error: $e');
+      logger.e('Lifecycle handling error: $e');
     }
   }
 
@@ -95,7 +97,7 @@ class _ScanPageState extends State<ScanPage>
       setState(() => _isInitializing = false);
       startScan();
     } catch (e) {
-      debugPrint('initializeScanner error: $e');
+      logger.e('initializeScanner error: $e');
       if (!mounted) return;
       setState(() => _isInitializing = false);
     }
@@ -130,7 +132,7 @@ class _ScanPageState extends State<ScanPage>
     try {
       await controller.resetZoomScale();
     } catch (e) {
-      debugPrint('resetZoomScale error: $e');
+      logger.e('resetZoomScale error: $e');
     }
   }
 
@@ -147,7 +149,7 @@ class _ScanPageState extends State<ScanPage>
 
     _currentZoom = target;
     controller.setZoomScale(target).catchError((Object e) {
-      debugPrint('setZoomScale error: $e');
+      logger.e('setZoomScale error: $e');
     });
   }
 
@@ -157,7 +159,7 @@ class _ScanPageState extends State<ScanPage>
       if (!mounted) return;
       setState(() => _torchOn = !_torchOn);
     } catch (e) {
-      debugPrint('toggleTorch error: $e');
+      logger.e('toggleTorch error: $e');
     }
   }
 
@@ -195,14 +197,14 @@ class _ScanPageState extends State<ScanPage>
       if (!mounted) return;
       startScan();
     } catch (e) {
-      debugPrint('Failed to analyze image: $e');
+      logger.e('Failed to analyze image: $e');
       if (!mounted) return;
       try {
         await _controller?.start();
         if (!mounted) return;
         startScan();
       } catch (err) {
-        debugPrint('Failed to restart scanner: $err');
+        logger.e('Failed to restart scanner: $err');
       }
     }
   }
@@ -228,7 +230,7 @@ class _ScanPageState extends State<ScanPage>
       widget.onScanResult?.call(data);
       Navigator.of(context).pop(data);
     } catch (e) {
-      debugPrint('Navigator error: $e');
+      logger.e('Navigator error: $e');
     }
   }
 

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+import 'package:disable_battery_optimization/disable_battery_optimization.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show WebSocket, File;
@@ -13,6 +15,9 @@ import '../api/api_service.dart';
 import '../models/presentation.dart';
 import '../session/account.dart';
 import '../platform.dart';
+import '../utils/logger.dart';
+import '../utils/storage.dart';
+import '../utils/time.dart';
 
 @pragma('vm:entry-point')
 void _startForegroundCallback() {
@@ -54,6 +59,7 @@ class _PresentationPageState extends State<PresentationPage> {
   int _totalCount = 0;
   List<Map<String, dynamic>> _slides = [];
   String? _currentPresentationId;
+  String? _currentPresentationTitle;
   final List<String> _unlockedProblemIds = [];
 
   bool _isLoading = false;
@@ -74,12 +80,14 @@ class _PresentationPageState extends State<PresentationPage> {
   // 倒计时相关
   int? _countdownSeconds;
   Timer? _countdownTimer;
-  
-  // 菜单位置
-  Offset _menuPosition = Offset.zero;
-  
+
   // 全屏状态
   bool _isFullScreen = false;
+
+  // 下载进度
+  bool _isDownloading = false;
+  int _downloadedCount = 0;
+  int _downloadTotal = 0;
 
 
   @override
@@ -105,6 +113,11 @@ class _PresentationPageState extends State<PresentationPage> {
     _pageController.dispose();
     _scrollController.dispose();
     _stopForegroundService();
+
+    // 恢复方向与系统栏
+    SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+
     super.dispose();
   }
 
@@ -164,23 +177,42 @@ class _PresentationPageState extends State<PresentationPage> {
 
   Future<void> _startForegroundService() async {
     // 请求忽略电池优化
-    if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
-      await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+    final pref = StorageManager.prefs;
+    // 对于各个厂商的定制系统 无法获取到电池优化的状态
+    final bool isBatteryOptimizationDisabled = pref.getBool('isBatteryOptimizationDisabled') ?? false;
+
+    if (!isBatteryOptimizationDisabled) {
+      bool? isAllDisabled = await DisableBatteryOptimization.isAllBatteryOptimizationDisabled;
+
+      if (isAllDisabled != null && !isAllDisabled) {
+        // 引导用户完成手机厂商的设置（自启动和电池优化）
+        await DisableBatteryOptimization.showDisableAllOptimizationsSettings(
+            "开启自启动",
+            "请按步骤开启自启动，否则课程在后台会断开连接",
+            "检测到系统有额外的电池优化",
+            "请按步骤关闭额外的电池优化，以保证连接稳定"
+        );
+      } else {
+        if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
+          await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+        }
+      }
+      pref.setBool('isBatteryOptimizationDisabled', true);
     }
 
     // 初始化前台服务
     FlutterForegroundTask.init(
       androidNotificationOptions: AndroidNotificationOptions(
-        channelId: 'websocket_service',
-        channelName: 'WebSocket Background Service',
-        channelDescription: 'Keep WebSocket connection alive'
+          channelId: 'websocket_service',
+          channelName: 'WebSocket Background Service',
+          channelDescription: 'Keep WebSocket connection alive'
       ),
       iosNotificationOptions: const IOSNotificationOptions(
-        showNotification: false
+          showNotification: false
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.repeat(5000),
-        allowWifiLock: true
+          eventAction: ForegroundTaskEventAction.repeat(5000),
+          allowWifiLock: true
       ),
     );
 
@@ -228,7 +260,7 @@ class _PresentationPageState extends State<PresentationPage> {
         },
       );
     } catch (e) {
-      debugPrint('WebSocket 连接失败：$e');
+      logger.e('WebSocket 连接失败：$e');
     }
   }
 
@@ -264,7 +296,7 @@ class _PresentationPageState extends State<PresentationPage> {
       final data = jsonDecode(message);
       final op = data['op'];
 
-      debugPrint('WebSocket S2C：$message');
+      logger.d('WebSocket S2C：$message');
       
       final messageText = data['message'];
 
@@ -441,9 +473,19 @@ class _PresentationPageState extends State<PresentationPage> {
             }
           }
           break;
+
+        case 'locationcheckinext':
+          // 位置签到开始
+          _handleLocationCheckInStart(data);
+          break;
+
+        case 'locationcheckinend':
+          // 位置签到结束
+          _handleLocationCheckInEnd(data);
+          break;
       }
     } catch (e) {
-      debugPrint('解析消息失败：$e');
+      logger.e('解析消息失败：$e');
     }
   }
 
@@ -494,7 +536,12 @@ class _PresentationPageState extends State<PresentationPage> {
         });
       }
     }
-    
+
+    _scrollTimelineToBottom();
+  }
+
+  /// 时间线滚动到底部
+  void _scrollTimelineToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
@@ -504,6 +551,159 @@ class _PresentationPageState extends State<PresentationPage> {
         );
       }
     });
+  }
+
+  Future<void> _handleLocationCheckInStart(Map<String, dynamic> data) async {
+    /// FIXME 需要根据实际参数进行调整
+    final lessonId = widget.lessonId;
+    final startMs = data['startMs'] ?? data['serverTime'];
+    final timestamp = startMs is int
+        ? DateTime.fromMillisecondsSinceEpoch(startMs)
+        : DateTime.now();
+
+    final event = TimelineEvent(
+      type: 'locationcheckin_start',
+      code: null,
+      title: '位置签到开始',
+      timestamp: timestamp,
+      subtitle: '签到中...'
+    );
+    setState(() {
+      _timeline.add(event);
+    });
+    _scrollTimelineToBottom();
+
+    // 查询所有账号签到状态
+    final allAccounts = AccountManager.allAccounts;
+    final getResults = await ApiService.sendForEachUser(
+      allAccounts,
+      (user) async {
+        final api = RCCourseApi(user);
+        return await api.getCheckIn();
+      },
+    );
+
+    final getCheckInTexts = <String>[];
+    final submitTexts = <String>[];
+    int signedCount = 0;
+
+    for (int i = 0; i < getResults.length; i++) {
+      final result = getResults[i];
+      final user = allAccounts[i];
+      getCheckInTexts.add('=== ${user.name} ===\n${const JsonEncoder.withIndent('  ').convert(result)}');
+
+      if (result == null) continue;
+      if (result['signed'] == true) {
+        signedCount++;
+        continue;
+      }
+
+      // 使用返回的位置信息自动签到
+      final session = result['session'];
+      final sessionMap = session is Map<String, dynamic> ? session : null;
+      final lat = (sessionMap?['centerLat'] as num?)?.toDouble()
+          ?? (result['lat'] as num?)?.toDouble()
+          ?? (data['centerLat'] as num?)?.toDouble();
+      final lng = (sessionMap?['centerLng'] as num?)?.toDouble()
+          ?? (result['lng'] as num?)?.toDouble()
+          ?? (data['centerLng'] as num?)?.toDouble();
+      if (lat == null || lng == null) continue;
+
+      final address = (result['address'] as String?) ?? '';
+      final api = RCCourseApi(user);
+      final submitResult = await api.submitLocationCheckIn(lessonId, lat, lng, address);
+      submitTexts.add('${user.name}\n${const JsonEncoder.withIndent('  ').convert(submitResult)}');
+
+      if (submitResult != null && submitResult['code'] == 0) {
+        signedCount++;
+      }
+    }
+
+    // debug
+    if (mounted) {
+      _showDebugDataDialog(
+        'getCheckIn 返回',
+        getCheckInTexts.isEmpty ? '无账号' : getCheckInTexts.join('\n\n'),
+      );
+      if (submitTexts.isNotEmpty) {
+        _showDebugDataDialog('submitLocationCheckIn 返回', submitTexts.join('\n\n'));
+      }
+    }
+
+    // 更新时间线签到状态
+    final total = allAccounts.length;
+    String subtitle;
+    if (total == 0) {
+      subtitle = '无账号';
+    } else if (signedCount >= total) {
+      subtitle = '已签到 ($signedCount/$total)';
+    } else if (signedCount > 0) {
+      subtitle = '部分已签到 $signedCount/$total';
+    } else {
+      subtitle = '未签到';
+    }
+    if (mounted) {
+      setState(() {
+        event.subtitle = subtitle;
+      });
+    }
+  }
+
+  /// 处理位置签到结束
+  void _handleLocationCheckInEnd(Map<String, dynamic> data) {
+    final endMs = data['endedAt'] ?? data['endMs'] ?? data['serverTime'];
+    final timestamp = endMs is int
+        ? DateTime.fromMillisecondsSinceEpoch(endMs)
+        : DateTime.now();
+
+    setState(() {
+      _timeline.add(TimelineEvent(
+        type: 'locationcheckin_end',
+        code: null,
+        title: '位置签到结束',
+        timestamp: timestamp
+      ));
+    });
+    _scrollTimelineToBottom();
+  }
+
+  void _showDebugDataDialog(String title, String content) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              content,
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭'),
+          ),
+          IconButton(
+            tooltip: '复制',
+            icon: const Icon(Icons.copy, size: 20),
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: content));
+              if (dialogContext.mounted) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  const SnackBar(
+                    content: Text('已复制'),
+                    duration: Duration(seconds: 1),
+                  ),
+                );
+              }
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _loadPresentation(String presentationId) async {
@@ -529,6 +729,7 @@ class _PresentationPageState extends State<PresentationPage> {
               .toList();
           _totalCount = presentation.slides.length;
           _currentPresentationId = presentationId;
+          _currentPresentationTitle = presentation.title;
           if (_slides.isNotEmpty && _currentSlideIndex >= 0 && _currentSlideIndex < _slides.length) {
             _currentProblem = presentation.slides[_currentSlideIndex].problem;
           }
@@ -536,7 +737,7 @@ class _PresentationPageState extends State<PresentationPage> {
         });
       }
     } catch (e) {
-      debugPrint('加载 PPT 失败：$e');
+      logger.e('加载 PPT 失败：$e');
       setState(() {
         _isLoading = false;
       });
@@ -561,148 +762,247 @@ class _PresentationPageState extends State<PresentationPage> {
     });
   }
 
+  /// 非全屏模式下的 PPT 展示区
+  Widget _buildSlideViewer() {
+    return AspectRatio(
+      aspectRatio: 16 / 9,
+      child: Stack(
+        children: [
+          PageView.builder(
+            controller: _pageController,
+            itemCount: _slides.length,
+            onPageChanged: (index) {
+              setState(() {
+                _currentSlideIndex = index;
+                _currentProblem = _slides[index]['problem'];
+              });
+            },
+            itemBuilder: (context, index) => _buildSlideImage(_slides[index]),
+          ),
+          Positioned(
+            left: 16,
+            top: 16,
+            child: _buildPageIndicator(),
+          ),
+          Positioned(
+            right: 12,
+            top: 16,
+            child: _buildDownloadButton(),
+          ),
+          Positioned(
+            right: 12,
+            bottom: 12,
+            child: _buildFullscreenButton(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 单张幻灯片图片 普通模式与全屏模式共用
+  Widget _buildSlideImage(Map<String, dynamic> slide) {
+    final cover = slide['coverAlt'] as String?;
+    if (cover == null) {
+      return const Center(
+        child: Text('暂无 PPT', style: TextStyle(color: Colors.grey)),
+      );
+    }
+    return Center(
+      child: Image.network(
+        cover,
+        fit: BoxFit.contain,
+        width: double.infinity,
+        height: double.infinity,
+        loadingBuilder: (context, child, progress) {
+          if (progress == null) return child;
+          return const Center(child: CircularProgressIndicator());
+        },
+        errorBuilder: (context, error, stackTrace) {
+          return const Center(
+            child: Icon(Icons.error_outline, size: 48, color: Colors.grey),
+          );
+        },
+      ),
+    );
+  }
+
+  /// 全屏模式下的 PPT 展示区
   Widget _buildFullScreenPPT() {
-    return Stack(
-      children: [
-        PageView.builder(
-          controller: _pageController,
-          itemCount: _slides.length,
-          onPageChanged: (index) {
-            setState(() {
-              _currentSlideIndex = index;
-              _currentProblem = _slides[index]['problem'];
-            });
-          },
-          itemBuilder: (context, index) {
-            final slide = _slides[index];
-            final cover = slide['coverAlt'] as String?;
-            return Center(
-              child: cover != null
-                  ? GestureDetector(
-                      onLongPressDown: (details) {
-                        setState(() {
-                          _menuPosition = details.globalPosition;
-                        });
-                      },
-                      onLongPress: () async {
-                        final RenderBox? overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
-                        if (overlay == null) return;
-                        
-                        final result = await showMenu<String>(
-                          context: context,
-                          position: RelativeRect.fromLTRB(
-                            _menuPosition.dx,
-                            _menuPosition.dy,
-                            _menuPosition.dx + 1,
-                            _menuPosition.dy + 1,
-                          ),
-                          items: [
-                            const PopupMenuItem<String>(
-                              value: 'save',
-                              child: Text('保存图片'),
-                            ),
-                            const PopupMenuItem<String>(
-                              value: 'fullscreen',
-                              child: Text('退出全屏'),
-                            ),
-                          ],
-                        );
-                        
-                        if (result == 'save') {
-                          await _saveImageToGallery(cover);
-                        } else if (result == 'fullscreen') {
-                          setState(() {
-                            _isFullScreen = false;
-                          });
-                        }
-                      },
-                      child: Image.network(
-                        cover,
-                        fit: BoxFit.contain,
-                        width: double.infinity,
-                        height: double.infinity,
-                        loadingBuilder: (context, child, progress) {
-                          if (progress == null) return child;
-                          return const Center(
-                            child: CircularProgressIndicator(),
-                          );
-                        },
-                        errorBuilder: (context, error, stackTrace) {
-                          return const Center(
-                            child: Icon(
-                              Icons.error_outline,
-                              size: 48,
-                              color: Colors.grey,
-                            ),
-                          );
-                        },
-                      ),
-                    )
-                  : const Center(
-                      child: Text(
-                        '暂无 PPT',
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    ),
-            );
-          },
-        ),
-        Positioned(
-          right: 16,
-          top: 16,
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 6,
-            ),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: _currentSlideIndex == _currentLessonSlideIndex
-                ? RichText(
-                    text: TextSpan(
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                      ),
-                      children: [
-                        TextSpan(
-                          text: '当前 ',
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.primary,
-                          ),
-                        ),
-                        TextSpan(
-                          text: '${_currentSlideIndex + 1}/$_totalCount',
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
-                : Text(
-                    '${_currentSlideIndex + 1}/$_totalCount',
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SizedBox(
+          width: constraints.maxWidth,
+          height: constraints.maxHeight,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: PageView.builder(
+                  controller: _pageController,
+                  itemCount: _slides.length,
+                  onPageChanged: (index) {
+                    setState(() {
+                      _currentSlideIndex = index;
+                      _currentProblem = _slides[index]['problem'];
+                    });
+                  },
+                  itemBuilder: (context, index) => _buildSlideImage(_slides[index]),
+                ),
+              ),
+              Positioned(
+                left: 16,
+                top: 16,
+                child: _buildPageIndicator(),
+              ),
+              Positioned(
+                right: 12,
+                top: 16,
+                child: _buildDownloadButton(),
+              ),
+              Positioned(
+                right: 12,
+                bottom: 12,
+                child: _buildFullscreenButton(),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPageIndicator() {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 12,
+        vertical: 6,
+      ),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: _currentSlideIndex == _currentLessonSlideIndex
+          ? RichText(
+              text: TextSpan(
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+                children: [
+                  TextSpan(
+                    text: '当前 ',
                     style: TextStyle(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
+                      color: Theme.of(context).colorScheme.primary,
                     ),
                   ),
-          ),
-        ),
-      ],
+                  TextSpan(
+                    text: '${_currentSlideIndex + 1}/$_totalCount',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          : Text(
+              '${_currentSlideIndex + 1}/$_totalCount',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+    );
+  }
+
+  Widget _buildDownloadButton() {
+    return Builder(
+      builder: (context) {
+        return _buildOverlayIconButton(
+          icon: Icons.download,
+          onPressed: _isDownloading ? null : () => _showDownloadMenu(context),
+          tooltip: '下载',
+          progress: _downloadProgress,
+        );
+      },
+    );
+  }
+
+  Future<void> _toggleFullScreen() async {
+    if (_isFullScreen) {
+      await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } else {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    }
+    if (mounted) {
+      setState(() {
+        _isFullScreen = !_isFullScreen;
+      });
+      // 全屏切换会改变 PageView 视口宽度，而 PageController 按像素保存页码，
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_pageController.hasClients) return;
+        if ((_pageController.page?.round() ?? 0) != _currentSlideIndex) {
+          _pageController.jumpToPage(_currentSlideIndex);
+        }
+      });
+    }
+  }
+
+  Widget _buildFullscreenButton() {
+    return _buildOverlayIconButton(
+      icon: _isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
+      onPressed: _toggleFullScreen,
+      tooltip: _isFullScreen ? '退出全屏' : '全屏',
+    );
+  }
+
+  Widget _buildOverlayIconButton({
+    required IconData icon,
+    required VoidCallback? onPressed,
+    required String tooltip,
+    double? progress,
+  }) {
+    return SizedBox(
+      width: 24,
+      height: 24,
+      child: progress != null
+          ? Padding(
+              padding: const EdgeInsets.all(12),
+              child: CircularProgressIndicator(
+                value: progress,
+                strokeWidth: 3,
+                color: Colors.white,
+                backgroundColor: Colors.white24,
+              ),
+            )
+          : IconButton(
+              onPressed: onPressed,
+              style: IconButton.styleFrom(
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                padding: EdgeInsets.zero,
+              ),
+              icon: Icon(icon, color: Colors.white, size: 24, shadows: [Shadow(color: Colors.black, blurRadius: 4)]),
+              tooltip: tooltip,
+            ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: _isFullScreen ? null : AppBar(
+    return PopScope(
+      canPop: !_isFullScreen,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _isFullScreen) {
+          _toggleFullScreen();
+        }
+      },
+      child: Scaffold(
+        appBar: _isFullScreen ? null : AppBar(
         title: Text(widget.title),
-        backgroundColor: Theme.of(context).colorScheme.primary,
-        foregroundColor: Colors.white,
       ),
       body: _isLoading
           ? const Center(
@@ -733,145 +1033,13 @@ class _PresentationPageState extends State<PresentationPage> {
                   ),
                 )
               : _isFullScreen
-                  ? _buildFullScreenPPT()
+                  ? ColoredBox(
+                      color: Colors.black,
+                      child: _buildFullScreenPPT(),
+                    )
                   : Column(
                   children: [
-                    // PPT 区域 - 根据屏幕宽度自动计算高度（保持幻灯片比例）
-                    AspectRatio(
-                      aspectRatio: 16 / 9,
-                      child: Stack(
-                        children: [
-                          PageView.builder(
-                            controller: _pageController,
-                            itemCount: _slides.length,
-                            onPageChanged: (index) {
-                              setState(() {
-                                _currentSlideIndex = index;
-                                _currentProblem = _slides[index]['problem'];
-                              });
-                            },
-                            itemBuilder: (context, index) {
-                              final slide = _slides[index];
-                              final cover = slide['coverAlt'] as String?;
-                              return Center(
-                                child: cover != null
-                                    ? GestureDetector(
-                                        onLongPressDown: (details) {
-                                          setState(() {
-                                            _menuPosition = details.globalPosition;
-                                          });
-                                        },
-                                        onLongPress: () async {
-                                          final RenderBox? overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
-                                          if (overlay == null) return;
-                                          
-                                          final result = await showMenu<String>(
-                                            context: context,
-                                            position: RelativeRect.fromLTRB(
-                                              _menuPosition.dx,
-                                              _menuPosition.dy,
-                                              _menuPosition.dx + 1,
-                                              _menuPosition.dy + 1,
-                                            ),
-                                            items: [
-                                              const PopupMenuItem<String>(
-                                                value: 'save',
-                                                child: Text('保存图片')
-                                              ),
-                                              PopupMenuItem<String>(
-                                                value: 'fullscreen',
-                                                child: Text('全屏')
-                                              ),
-                                            ],
-                                          );
-                                          
-                                          if (result == 'save') {
-                                            await _saveImageToGallery(cover);
-                                          } else if (result == 'fullscreen') {
-                                            setState(() {
-                                              _isFullScreen = !_isFullScreen;
-                                            });
-                                          }
-                                        },
-                                        child: Image.network(
-                                          cover,
-                                          fit: BoxFit.contain,
-                                          width: double.infinity,
-                                          height: double.infinity,
-                                          loadingBuilder: (context, child, progress) {
-                                            if (progress == null) return child;
-                                            return const Center(
-                                              child: CircularProgressIndicator(),
-                                            );
-                                          },
-                                          errorBuilder: (context, error, stackTrace) {
-                                            return const Center(
-                                              child: Icon(
-                                                Icons.error_outline,
-                                                size: 48,
-                                                color: Colors.grey,
-                                              ),
-                                            );
-                                          },
-                                        ),
-                                      )
-                                    : const Center(
-                                        child: Text(
-                                          '暂无 PPT',
-                                          style: TextStyle(color: Colors.grey),
-                                        ),
-                                      ),
-                              );
-                            },
-                          ),
-                          Positioned(
-                            right: 16,
-                            top: 16,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 6,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: _currentSlideIndex == _currentLessonSlideIndex
-                                  ? RichText(
-                                      text: TextSpan(
-                                        style: const TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                        children: [
-                                          TextSpan(
-                                            text: '当前 ',
-                                            style: TextStyle(
-                                              color: Theme.of(context).colorScheme.primary,
-                                            ),
-                                          ),
-                                          TextSpan(
-                                            text: '${_currentSlideIndex + 1}/$_totalCount',
-                                            style: TextStyle(
-                                              color: Theme.of(context).colorScheme.onSurfaceVariant,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    )
-                                  : Text(
-                                      '${_currentSlideIndex + 1}/$_totalCount',
-                                      style: TextStyle(
-                                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                    _buildSlideViewer(),
                     Expanded(
                       child: SingleChildScrollView(
                         child: Column(
@@ -1026,6 +1194,7 @@ class _PresentationPageState extends State<PresentationPage> {
                     ),
                   ],
                 ),
+      ),
     );
   }
 
@@ -1068,6 +1237,14 @@ class _PresentationPageState extends State<PresentationPage> {
       case 'randompick':
         bgColor = Colors.orange;
         icon = Icons.person_add;
+        break;
+      case 'locationcheckin_start':
+        bgColor = Colors.teal;
+        icon = Icons.location_on;
+        break;
+      case 'locationcheckin_end':
+        bgColor = Colors.blueGrey;
+        icon = Icons.location_off;
         break;
       default:
         bgColor = Colors.grey;
@@ -1133,12 +1310,23 @@ class _PresentationPageState extends State<PresentationPage> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      _formatTime(event.timestamp),
+                      formatRelativeTime(event.timestamp),
                       style: TextStyle(
                         fontSize: 12,
                         color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
                     ),
+                    if (event.subtitle != null && event.subtitle!.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        event.subtitle!,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: _getSubtitleColor(event.subtitle!),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -1164,19 +1352,13 @@ class _PresentationPageState extends State<PresentationPage> {
     }
   }
 
-  String _formatTime(DateTime time) {
-    final now = DateTime.now();
-    final diff = now.difference(time);
-    
-    if (diff.inMinutes < 1) {
-      return '刚刚';
-    } else if (diff.inMinutes < 60) {
-      return '${diff.inMinutes}分钟前';
-    } else if (diff.inHours < 24) {
-      return '${diff.inHours}小时前';
-    } else {
-      return '${time.month}/${time.day} ${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+  Color _getSubtitleColor(String subtitle) {
+    if (subtitle.startsWith('已签到')) return Colors.green;
+    if (subtitle.startsWith('部分')) return Colors.orange;
+    if (subtitle.startsWith('签到中')) {
+      return Theme.of(context).colorScheme.onSurfaceVariant;
     }
+    return Theme.of(context).colorScheme.error;
   }
 
   String _getProblemTypeLabel(int type) {
@@ -1487,17 +1669,9 @@ class _PresentationPageState extends State<PresentationPage> {
 
   Widget _buildFillBlankInputs() {
     if (_currentProblem == null) return const SizedBox.shrink();
-    
-    // 解析题目中的填空位置
-    final body = _currentProblem!.body;
-    final blanks = <String>[];
-    final pattern = RegExp(r'\[填空\d*\]');
-    final matches = pattern.allMatches(body);
-    
-    for (var match in matches) {
-      blanks.add(match.group(0) ?? '');
-    }
-    
+
+    final blanks = _currentProblem!.blanks;
+
     if (blanks.isEmpty) {
       return TextField(
         decoration: const InputDecoration(
@@ -1505,21 +1679,22 @@ class _PresentationPageState extends State<PresentationPage> {
           border: OutlineInputBorder(),
         ),
         onChanged: (value) {
-          _textAnswer = value;
+          _answer = [value];
         },
       );
     }
-    
+
     // 多个填空，显示多个输入框
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: List.generate(blanks.length, (index) {
+        final blank = blanks[index];
         return Padding(
           padding: const EdgeInsets.only(bottom: 12),
           child: TextField(
             decoration: InputDecoration(
-              labelText: '填空${index + 1}',
-              hintText: '请输入第${index + 1}个空的答案',
+              labelText: '填空${blank.num}',
+              hintText: '请输入第${blank.num}个空的答案',
               border: const OutlineInputBorder(),
             ),
             onChanged: (value) {
@@ -1601,18 +1776,66 @@ class _PresentationPageState extends State<PresentationPage> {
     );
   }
 
-  Future<void> _saveImageToGallery(String imageUrl) async {
-    try {
-      // 从缓存中获取图片文件
-      final file = await DefaultCacheManager().getSingleFile(imageUrl);
-      final bytes = await file.readAsBytes();
-            
-      await PhotoManager.editor.saveImage(
-        bytes,
-        filename: 'RainClassroom_${DateTime.now().millisecondsSinceEpoch}.jpg'
-        // 不会被使用
-      );
+  String get _pptTitle =>
+      _currentPresentationTitle?.isNotEmpty == true
+          ? _currentPresentationTitle!
+          : widget.title;
 
+  double? get _downloadProgress =>
+      _isDownloading && _downloadTotal > 0
+          ? _downloadedCount / _downloadTotal
+          : null;
+
+  Future<void> _showDownloadMenu(BuildContext context) async {
+    final RenderBox button = context.findRenderObject() as RenderBox;
+    final RenderBox overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+    final position = RelativeRect.fromRect(
+      Rect.fromPoints(
+        button.localToGlobal(Offset.zero, ancestor: overlay),
+        button.localToGlobal(button.size.bottomRight(Offset.zero), ancestor: overlay)
+      ),
+      Offset.zero & overlay.size,
+    );
+
+    final result = await showMenu<String>(
+      context: context,
+      position: position,
+      items: const [
+        PopupMenuItem<String>(
+          value: 'current',
+          child: Text('下载当前页'),
+        ),
+        PopupMenuItem<String>(
+          value: 'all',
+          child: Text('下载所有页'),
+        ),
+      ],
+    );
+
+    if (result == 'current') {
+      await _downloadCurrentPage();
+    } else if (result == 'all') {
+      await _downloadAllPages();
+    }
+  }
+
+  Future<void> _downloadCurrentPage() async {
+    String? cover;
+    if (_slides.isNotEmpty && _currentSlideIndex < _slides.length) {
+      cover = _slides[_currentSlideIndex]['coverAlt'] as String?;
+    }
+    if (cover == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('没有可下载的页面')),
+        );
+      }
+      return;
+    }
+
+    try {
+      await _saveSlide(cover, title: '$_pptTitle-${_currentSlideIndex + 1}');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('图片已保存到相册')),
@@ -1626,6 +1849,76 @@ class _PresentationPageState extends State<PresentationPage> {
       }
     }
   }
+
+  Future<void> _downloadAllPages() async {
+    if (_isDownloading) return;
+
+    final covers = _slides
+        .map((slide) => slide['coverAlt'] as String?)
+        .whereType<String>()
+        .toList();
+
+    if (covers.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('没有可下载的页面')),
+        );
+      }
+      return;
+    }
+
+    setState(() {
+      _isDownloading = true;
+      _downloadedCount = 0;
+      _downloadTotal = covers.length;
+    });
+
+    int success = 0;
+    final relativePath = 'Pictures/$_pptTitle';
+    for (int i = 0; i < covers.length; i++) {
+      try {
+        await _saveSlide(
+          covers[i],
+          title: '${i + 1}',
+          relativePath: relativePath,
+        );
+        success++;
+      } catch (e) {
+        logger.e('保存第 ${i + 1} 页失败：$e');
+      }
+      if (mounted) {
+        setState(() {
+          _downloadedCount = i + 1;
+        });
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _isDownloading = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已保存 $success/${covers.length} 页')),
+      );
+    }
+  }
+
+  Future<void> _saveSlide(
+    String imageUrl, {
+    required String title,
+    String? relativePath,
+  }) async {
+    // 从缓存中获取图片文件
+    final file = await DefaultCacheManager().getSingleFile(imageUrl);
+    final bytes = await file.readAsBytes();
+
+    await PhotoManager.editor.saveImage(
+      bytes,
+      filename: '$title.jpg',
+      title: title,
+      relativePath: relativePath,
+    );
+  }
 }
 
 class TimelineEvent {
@@ -1636,6 +1929,7 @@ class TimelineEvent {
   final int? total;
   final int? limit;
   final DateTime timestamp;
+  String? subtitle;
   // problem
   final String? problemId;
   final String? presentationId;
@@ -1649,6 +1943,7 @@ class TimelineEvent {
     this.total,
     this.limit,
     required this.timestamp,
+    this.subtitle,
     this.problemId,
     this.presentationId,
     this.problemDt,

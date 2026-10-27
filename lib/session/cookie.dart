@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:cookie_jar/cookie_jar.dart';
@@ -9,6 +8,7 @@ import '../models/user.dart';
 import 'account.dart';
 import '../platform.dart';
 import '../utils/storage.dart';
+import '../utils/logger.dart';
 
 class CookieInterceptor extends Interceptor {
   @override
@@ -53,7 +53,7 @@ class CookieInterceptor extends Interceptor {
           cookies.add(Cookie.fromSetCookieValue(header));
         } catch (e) {
           // sso_schooltime 存在非法字符 解析器存在问题
-          debugPrint('忽略错误Cookie: $header');
+          logger.w('忽略错误Cookie: $header');
         }
       }
 
@@ -105,7 +105,7 @@ class CookieManager {
           _userCookieJars[user.uid] = cookieJar;
           await _loadCookiesForUser(user.uid, cookieJar);
         } catch (e) {
-          debugPrint('预加载账号 ${user.uid} 的 CookieJar 失败：$e');
+          logger.e('预加载账号 ${user.uid} 的 CookieJar 失败：$e');
         }
       }),
     );
@@ -152,7 +152,7 @@ class CookieManager {
     }
 
     if (successCount > 0 || failCount > 0) {
-      debugPrint('账号刷新完成：成功 $successCount 个，失败 $failCount 个');
+      logger.i('账号刷新完成：成功 $successCount 个，失败 $failCount 个');
     }
   }
 
@@ -181,7 +181,7 @@ class CookieManager {
       }
       await cookieJar.saveFromResponse(domainUri, cookies);
     } catch (e) {
-      debugPrint('用户 $userId 的 Cookie 加载失败：$e');
+      logger.e('用户 $userId 的 Cookie 加载失败：$e');
     }
   }
 

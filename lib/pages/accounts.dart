@@ -7,7 +7,9 @@ import 'package:url_launcher/url_launcher.dart';
 import '../session/account.dart';
 import '../models/user.dart';
 import '../platform.dart';
+import '../utils/logger.dart';
 import '../push/easemob.dart';
+import '../push/update.dart';
 import 'widget/avatar.dart';
 import 'login.dart';
 
@@ -313,40 +315,111 @@ class _AccountsPageState extends State<AccountsPage> with TickerProviderStateMix
 
   void _showAboutDialog() async {
     final packageInfo = await PackageInfo.fromPlatform();
-    final appIcon = Image.asset(
-      'images/logo.png',
-      width: 60,
-      height: 60
-    );
-    
-    showAboutDialog(
+
+    if (!mounted) return;
+
+    await showDialog<void>(
       context: context,
-      applicationName: '课程助手',
-      applicationVersion: packageInfo.version,
-      applicationIcon: appIcon,
-      // applicationLegalese: '',
-      children: [
-        const Text('一个管理学习通、雨课堂课程的应用。'),
-        const Text('支持多账号管理、课程查看、活动签到等功能。'),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            const Text('开发者：'),
-            GestureDetector(
-              onTap: () async {
-                final Uri url = Uri.parse('https://github.com/AneryCoft');
-                if (await canLaunchUrl(url)) {
-                  await launchUrl(url, mode: LaunchMode.inAppBrowserView);
-                }
-              },
-              child: Text(
-                'AneryCoft',
-                style: TextStyle(color: Theme.of(context).colorScheme.primary),
+      builder: (dialogContext) {
+        final colorScheme = Theme.of(dialogContext).colorScheme;
+
+        return AlertDialog(
+          title: Row(
+            children: [
+              Image.asset(
+                'images/logo.png',
+                width: 40,
+                height: 40,
               ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text('课程助手'),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '版本 ${packageInfo.version}',
+                  style: TextStyle(color: colorScheme.outline),
+                ),
+                const SizedBox(height: 12),
+                const Text('一个管理学习通、雨课堂课程的应用。'),
+                const Text('支持多账号管理、课程查看、活动签到等功能。'),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Text('开发者：'),
+                    GestureDetector(
+                      onTap: () async {
+                        final Uri url =
+                        Uri.parse('https://github.com/AneryCoft');
+                        if (await canLaunchUrl(url)) {
+                          await launchUrl(
+                            url,
+                            mode: LaunchMode.inAppBrowserView
+                          );
+                        }
+                      },
+                      child: Text(
+                        'AneryCoft',
+                        style: TextStyle(color: colorScheme.primary)
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actionsOverflowButtonSpacing: 8,
+          actions: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.start,
+                  children: [
+                    TextButton.icon(
+                      onPressed: () async {
+                        Navigator.of(dialogContext).pop();
+                        await Update.checkUpdate(ignoreSkip: true);
+                      },
+                      icon: const Icon(Icons.system_update_alt, size: 18),
+                      label: const Text('检查更新'),
+                    ),
+                    const SizedBox(width: 4),
+                    TextButton.icon(
+                      onPressed: () async {
+                        Navigator.of(dialogContext).pop();
+                        final success = await exportLog();
+                        if (mounted && success != null) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text(success ? '日志已分享' : '日志分享失败')),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.file_upload_outlined, size: 18),
+                      label: const Text('导出日志'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(),
+                    child: const Text('关闭')
+                  ),
+                ),
+              ],
             ),
           ],
-        ),
-      ],
+        );
+      },
     );
   }
 

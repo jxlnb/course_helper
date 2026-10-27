@@ -4,6 +4,7 @@ import '../../models/user.dart';
 import '../../session/account.dart';
 import '../../api/api_service.dart';
 import '../../api/image.dart';
+import '../../utils/logger.dart';
 
 class AccountsSelector extends StatefulWidget {
   final ValueChanged<List<User>> onSelectionChanged;
@@ -86,7 +87,7 @@ class AccountsSelectorState extends State<AccountsSelector> {
       final currentUserId = AccountManager.currentSessionId;
       _currentUser = AccountManager.getAccountById(currentUserId!);
     } catch (e) {
-      debugPrint('加载账号失败：$e');
+      logger.e('加载账号失败：$e');
     }
     // 通知外部初始选中状态
     WidgetsBinding.instance.addPostFrameCallback((_) {

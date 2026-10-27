@@ -36,7 +36,11 @@ class PatternSign implements SignStrategy {
       buildChildren: (context) {
         return [
           // 定位相关UI
-          ...SignLocationUi.buildSection(context, state),
+          ...SignLocationUi.buildSection(
+            context,
+            state,
+            onReselect: () => SignLocationUi.showPicker(state)
+          ),
 
           // 手势绘制区域
           Container(

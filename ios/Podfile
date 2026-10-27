@@ -1,5 +1,6 @@
 # Uncomment this line to define a global platform for your project
-platform :ios, '13.0'
+# camera / mobile_scanner / photo_manager 等插件要求 iOS 13+，这里统一用 15.0
+platform :ios, '15.0'
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -38,27 +39,25 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
 
+    # permission_handler 在 iOS 端用编译宏控制权限是否参与编译，默认全部关闭。
+    # 不声明的话，请求到的权限不会弹系统弹窗，也不会出现在“设置-隐私”里。
     target.build_configurations.each do |config|
-      # permission_handler excludes EVERY permission by default and only compiles in
-      # the ones listed below. With no macros at all the plugin never talks to the
-      # iOS authorization APIs, so no permission dialog is ever presented and the
-      # app does not appear under Settings > Privacy > Location.
-      # See https://pub.dev/packages/permission_handler -> iOS - CocoaPods.
-      #
-      # Note: merged explicitly instead of using ||= so an existing value coming
-      # from flutter_additional_ios_build_settings() cannot silently win.
-      existing = config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] || ['$(inherited)']
-      existing = [existing] if existing.is_a?(String)
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
+        '$(inherited)',
 
-      permissions = [
-        'PERMISSION_LOCATION=1',      # dart: Permission.location / locationWhenInUse
-        'PERMISSION_CAMERA=1',        # dart: Permission.camera
-        'PERMISSION_MICROPHONE=1',    # dart: Permission.microphone
-        'PERMISSION_PHOTOS=1',        # dart: Permission.photos
-        'PERMISSION_NOTIFICATIONS=1', # dart: Permission.notification
+        ## dart: PermissionGroup.location / locationAlways / locationWhenInUse
+        'PERMISSION_LOCATION=1',
+        'PERMISSION_LOCATION_WHENINUSE=0',
+
+        ## dart: PermissionGroup.camera
+        'PERMISSION_CAMERA=1',
+
+        ## dart: PermissionGroup.photos
+        'PERMISSION_PHOTOS=1',
+
+        ## dart: PermissionGroup.notification
+        'PERMISSION_NOTIFICATIONS=1',
       ]
-
-      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] = (existing + permissions).uniq
     end
   end
 end

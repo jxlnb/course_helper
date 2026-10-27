@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 
 import '../../api/api_service.dart';
+import '../../utils/logger.dart';
 
 /// 全局头像缓存类
 class AvatarCache {
@@ -13,20 +14,17 @@ class AvatarCache {
   static Future<Uint8List?> getImage(String url) async {
     // 检查是否已有缓存
     if (_cache.containsKey(url)) {
-      debugPrint('使用缓存的头像: $url');
       return _cache[url]!;
     }
     
     // 检查是否正在加载
     if (_loadingUrls.contains(url)) {
-      debugPrint('等待进行中的头像请求: $url');
       // 等待一小段时间后重试
       await Future.delayed(const Duration(milliseconds: 50));
       return getImage(url);
     }
     
     // 创建新的请求
-    debugPrint('发起新的头像请求: $url');
     _loadingUrls.add(url);
     
     final future = _fetchImage(url).whenComplete(() {
@@ -44,13 +42,12 @@ class AvatarCache {
     try {
       final response = await ApiService.sendRequest(url, responseType: ResponseType.bytes);
       if (response == null) {
-        debugPrint('头像请求失败: $url');
+        logger.w('头像请求失败: $url');
         return null;
       }
-      debugPrint('头像请求成功: $url');
       return response.data;
     } catch (e) {
-      debugPrint('头像请求失败: $url, 错误: $e');
+      logger.e('头像请求失败: $url, 错误: $e');
       return null;
     }
   }
@@ -59,7 +56,7 @@ class AvatarCache {
   static void clearCache() {
     _cache.clear();
     _loadingUrls.clear();
-    debugPrint('头像缓存已清空');
+    logger.d('头像缓存已清空');
   }
   
   /// 获取缓存统计信息

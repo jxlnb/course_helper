@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'dart:math';
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 
 import 'api_service.dart';
 import '../utils/encrypt.dart';
+import '../utils/logger.dart';
 
 class CaptchaApi extends Api {
   CaptchaApi([super.user]);
@@ -33,7 +33,7 @@ class CaptchaApi extends Api {
     Match? configMatch = _captchaRegExp.firstMatch(configResponseText);
     
     if (configMatch == null) {
-      debugPrint('Error: Failed to parse captcha config response');
+      logger.e('Failed to parse captcha config response');
       return null;
     }
 
@@ -75,7 +75,7 @@ class CaptchaApi extends Api {
   /// 提交验证码结果
   Future<String?> submitCaptcha(double xValue, String token, String referer) async {
     if (_iv.isEmpty || _timestamp <= 0) {
-      debugPrint('Error: iv or timestamp not initialized');
+      logger.e('iv or timestamp not initialized');
       return null;
     }
     

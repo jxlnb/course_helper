@@ -36,7 +36,11 @@ class CodeSign implements SignStrategy {
       buildChildren: (context) {
         return [
           // 定位相关UI
-          ...SignLocationUi.buildSection(context, state),
+          ...SignLocationUi.buildSection(
+            context,
+            state,
+            onReselect: () => SignLocationUi.showPicker(state)
+          ),
 
           Text('请输入 ${state.signParams.numberCount} 位签到码'),
           const SizedBox(height: 16),

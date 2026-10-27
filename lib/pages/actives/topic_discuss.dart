@@ -6,6 +6,7 @@ import '../../../api/api_service.dart';
 import '../../../models/user.dart';
 import '../../../models/active.dart';
 import '../../../session/account.dart';
+import '../../../utils/logger.dart';
 import '../widget/accounts_selector.dart';
 import '../widget/avatar.dart';
 
@@ -168,7 +169,7 @@ class _TopicDiscussPageState extends State<TopicDiscussPage> {
         });
       }
     } catch (e) {
-      debugPrint('重新加载评论失败: $e');
+      logger.e('重新加载评论失败: $e');
     }
   }
 

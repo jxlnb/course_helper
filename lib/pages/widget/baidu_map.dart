@@ -1,20 +1,12 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
-import 'dart:io' show Platform;
 import 'package:flutter_baidu_mapapi_map/flutter_baidu_mapapi_map.dart';
 import 'package:flutter_baidu_mapapi_base/flutter_baidu_mapapi_base.dart';
 import 'package:flutter_baidu_mapapi_search/flutter_baidu_mapapi_search.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_bmflocation/flutter_bmflocation.dart';
 
-/// iOS 端百度地图 SDK 与百度定位 SDK 必须在运行时通过接口设置 AK，
-/// 两个插件都不会去读 Info.plist。Android 端仍然在
-/// android/app/src/main/AndroidManifest.xml 的 com.baidu.lbsapi.API_KEY 中配置，
-/// 因此下面的调用只在 iOS 上执行，Android 行为完全不变。
-///
-/// 该 AK 绑定 Bundle ID（com.jxlnb.coursehelper），换 Bundle ID 需在
-/// 百度地图开放平台同步修改安全码，否则地图无瓦片、定位不出结果。
-const String _baiduMapAk = 'BwImLMKeRsSOFVAVyS8UFAgzltg8lweT';
+import '../../utils/logger.dart';
 
 class BaiduMapWidget extends StatefulWidget {
   final Function(BMFCoordinate)? onLocationSelected;
@@ -54,7 +46,7 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
   bool _hasReceivedFirstFix = false;
 
   /// 百度定位 SDK 直接返回的地址文案（isReGeocode 生效时非空）。
-  /// 逆地理编码搜索失败或被超时截断时用它兜底，避免显示「未知位置」。
+  /// 逆地理编码搜索失败或被超时截断时用它兜底，避免把已拿到的位置标成「未知位置」。
   String _lastSdkAddress = '';
 
   final LocationFlutterPlugin _locationPlugin = LocationFlutterPlugin();
@@ -68,10 +60,6 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
 
   /// 初始化定位
   Future<void> _initLocation() async {
-    // 鉴权与权限申请并行：权限弹框不必等鉴权，但真正发起定位前必须等鉴权完成，
-    // 否则会出现偶发的「错误码 7：鉴权失败导致无法返回定位、地址等信息」。
-    final authFuture = _initSdkApiKey();
-
     final hasPermission = await _checkPermissions();
     if (_isDisposed) return;
 
@@ -79,9 +67,6 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
       if (mounted) setState(() => _isLoading = false);
       return;
     }
-
-    await authFuture;
-    if (_isDisposed) return;
 
     await _initBaiduLocation();
     if (_isDisposed) return;
@@ -94,78 +79,20 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
     }
   }
 
-  /// 仅 iOS：给百度定位 SDK 与百度地图 SDK 设置 AK。
-  /// Android 端 AK 在 AndroidManifest.xml 中，已由原生读取，这里直接跳过。
-  Future<void> _initSdkApiKey() async {
-    if (!Platform.isIOS) return;
-
-    try {
-      // 定位插件的隐私合规必须单独设置：未同意之前百度定位 SDK 会拒绝工作并
-      // 返回鉴权网络错误(BMKLocationAuthErrorNetworkFailed = 1)。
-      // 地图插件的那句 BMFMapSDK.setAgreePrivacy 不会覆盖到定位插件。
-      await _locationPlugin.setAgreePrivacy(true);
-
-      // authAK() 会立即返回，真正的鉴权结果是通过回调异步送达的。
-      // 鉴权是联网校验（请求 loc.map.baidu.com），偶发网络错误很常见，
-      // 所以失败后重试几次，而不是一次失败就永久放弃。
-      var authResult = 'PermissionState:timeout';
-      for (var attempt = 1; attempt <= 3; attempt++) {
-        final authDone = Completer<String>();
-
-        _locationPlugin.getApiKeyCallback(callback: (String result) {
-          debugPrint('百度定位鉴权结果（第 $attempt 次）：$result');
-          if (!authDone.isCompleted) authDone.complete(result);
-        });
-
-        await _locationPlugin.authAK(_baiduMapAk);
-        BMFMapSDK.setApiKeyAndCoordType(_baiduMapAk, BMF_COORD_TYPE.BD09LL);
-
-        authResult = await authDone.future.timeout(
-          const Duration(seconds: 10),
-          onTimeout: () => 'PermissionState:timeout',
-        );
-        if (_isDisposed) return;
-
-        if (authResult.endsWith('PermissionState:0')) break;
-        if (attempt < 3) {
-          await Future.delayed(const Duration(seconds: 2));
-          if (_isDisposed) return;
-        }
-      }
-
-      // BMKLocationAuthErrorCode: 0=成功 1=网络错误 2=授权失败(AK/安全码)
-      if (!authResult.endsWith('PermissionState:0')) {
-        // 鉴权失败时给出可操作的提示。最常见的原因是自签工具改写了 Bundle ID，
-        // 导致 App 实际包名与百度后台的安全码不一致（地图 SDK 校验较松，
-        // 所以常表现为「地图能显示、定位与地址拿不到」）。
-        final reason = authResult.endsWith('timeout')
-            ? '等待百度鉴权回调超时'
-            : (authResult.endsWith('1') ? '无法连接百度鉴权服务器' : 'AK 或安全码不匹配');
-        debugPrint('百度定位鉴权失败：$authResult（$reason）');
-        if (mounted) {
-          setState(() => _locationInfo =
-              '百度定位鉴权失败（$reason）\n请检查百度后台的「安全码」是否与 App 的实际 Bundle ID 完全一致');
-        }
-      }
-    } catch (e) {
-      debugPrint('设置百度 AK 失败：$e');
-    }
-  }
-
   Future<void> _initBaiduLocation() async {
     _locationPlugin.singleLocationCallback(callback: (BaiduLocation result) {
       if (_isDisposed) return;
 
-      if (_isValidFix(result)) {
+      // locType 仅 Android 端返回，iOS 恒为 null
+      // iOS 用经纬度判定
+      if (result.latitude != null && result.longitude != null &&
+          (result.locType == null || result.locType! > 0)) {
         final coord = BMFCoordinate(result.latitude!, result.longitude!);
         _handleLocationUpdate(coord, result);
       } else {
         if (mounted) {
           setState(() {
-            final code = result.errorCode;
-            _locationInfo = code == null
-                ? '定位失败，请重试'
-                : '定位失败（错误码 $code：${result.errorInfo ?? '未知原因'}）';
+            _locationInfo = '定位失败(code=${result.errorCode}, info=${result.errorInfo})，请重试';
             _isLocating = false;
             _isManualRelocate = false;
           });
@@ -174,19 +101,6 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
     });
 
     await _prepareHighAccuracyLocation();
-  }
-
-  /// 判断一次定位回调是否携带可用坐标。
-  ///
-  /// Android 用 locType(>0 为成功) 标识结果类型；而 iOS 原生只下发
-  /// errorCode / errorInfo 与经纬度，**从不发送 locType**，所以 iOS 上
-  /// result.locType 恒为 null。若沿用 locType 判断，iOS 会把已经成功的
-  /// 定位结果也当成失败丢弃，表现为「定位失败，请重试」。
-  /// 因此这里以「经纬度存在 + 无错误码」为准，两端都适用。
-  bool _isValidFix(BaiduLocation result) {
-    if (result.latitude == null || result.longitude == null) return false;
-    final code = result.errorCode;
-    return code == null || code == 0;
   }
 
   /// 配置定位参数
@@ -218,7 +132,7 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
         iosOptions.getMap(),
       );
     } catch (e) {
-      debugPrint('配置定位参数失败：$e');
+      logger.e('配置定位参数失败：$e');
     }
   }
 
@@ -288,7 +202,7 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
         }
       });
     } catch (e) {
-      debugPrint('定位失败：$e');
+      logger.e('定位失败：$e');
       if (!_isDisposed && mounted) {
         setState(() {
           _locationInfo = '定位失败：$e';
@@ -329,10 +243,9 @@ class _BaiduMapWidgetState extends State<BaiduMapWidget> {
 
     BMFMarker marker = BMFMarker.icon(
       position: position,
-      icon: 'images/placeholder.png',
+      icon: 'images/location_on_120dp.png',
       title: '当前位置',
-      scaleX: 0.3,
-      scaleY: 0.3
+      enabled: false // 忽略触摸
     );
     await _mapController!.addMarker(marker);
     if (_isDisposed || _mapController == null) return '';

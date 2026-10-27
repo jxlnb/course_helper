@@ -63,7 +63,11 @@ class QRCodeSign implements SignStrategy {
       buildChildren: (context) {
         return [
           // 定位相关UI
-          ...SignLocationUi.buildSection(context, state),
+          ...SignLocationUi.buildSection(
+            context,
+            state,
+            onReselect: () => SignLocationUi.showPicker(state)
+          ),
 
           // 二维码扫描按钮（始终显示，位于位置信息下方）
           SizedBox(

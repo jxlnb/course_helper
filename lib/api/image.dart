@@ -1,9 +1,9 @@
-import 'package:flutter/foundation.dart';
 import 'dart:io';
 import 'package:dio/dio.dart';
 
 import 'api_service.dart';
 import '../utils/encrypt.dart';
+import '../utils/logger.dart';
 
 class CXImageApi extends Api {
   CXImageApi([super.user]);
@@ -14,7 +14,7 @@ class CXImageApi extends Api {
     final tokenResponse = await ApiService.sendRequest(tokenUrl);
 
     if (tokenResponse == null || tokenResponse.data == null) {
-      debugPrint('Failed to get token');
+      logger.e('获取token失败');
       return null;
     }
     final String token = tokenResponse.data['_token'];
@@ -94,7 +94,7 @@ class CXImageApi extends Api {
         }
       }
     } catch (e) {
-      debugPrint('URL转换失败: $e');
+      logger.e('URL转换失败: $e');
     }
     return url;
   }
@@ -113,7 +113,7 @@ class RCImageApi {
     if (tokenResponse == null || tokenResponse.data == null ||
         tokenResponse.data['success'] != true ||
         tokenResponse.data['data'] == null) {
-      debugPrint('Failed to get qiniu token');
+      logger.e('获取qiniu token失败');
       return null;
     }
 
@@ -134,7 +134,7 @@ class RCImageApi {
 
     if (uploadResponse == null || uploadResponse.data == null ||
         uploadResponse.data['success'] != true) {
-      debugPrint('Failed to upload to qiniu');
+      logger.e('上传到qiniu失败');
       return null;
     }
 
